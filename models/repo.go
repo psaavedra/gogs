@@ -570,8 +570,6 @@ type Mirror struct {
 	NextUpdateUnix int64
 
 	address string `xorm:"-"`
-
-	EnablePrune bool `xorm:"NOT NULL DEFAULT true"`
 }
 
 func (m *Mirror) BeforeInsert() {
