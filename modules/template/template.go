@@ -9,12 +9,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"mime"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"golang.org/x/net/html/charset"
 	"golang.org/x/text/transform"
+	"gopkg.in/editorconfig/editorconfig-core-go.v1"
 
 	"github.com/gogits/gogs/models"
 	"github.com/gogits/gogs/modules/base"
@@ -96,13 +99,25 @@ func NewFuncMap() []template.FuncMap {
 		"ShortSha":          base.ShortSha,
 		"MD5":               base.EncodeMD5,
 		"ActionContent2Commits": ActionContent2Commits,
-		"ToUtf8":                ToUtf8,
 		"EscapePound": func(str string) string {
 			return strings.NewReplacer("%", "%25", "#", "%23", " ", "%20").Replace(str)
 		},
 		"RenderCommitMessage": RenderCommitMessage,
 		"ThemeColorMetaTag": func() string {
-			return setting.ThemeColorMetaTag
+			return setting.UI.ThemeColorMetaTag
+		},
+		"FilenameIsImage": func(filename string) bool {
+			mimeType := mime.TypeByExtension(filepath.Ext(filename))
+			return strings.HasPrefix(mimeType, "image/")
+		},
+		"TabSizeClass": func(ec *editorconfig.Editorconfig, filename string) string {
+			if ec != nil {
+				def := ec.GetDefinitionForFilename(filename)
+				if def.TabWidth > 0 {
+					return fmt.Sprintf("tab-size-%d", def.TabWidth)
+				}
+			}
+			return "tab-size-8"
 		},
 	}}
 }
@@ -113,10 +128,6 @@ func Safe(raw string) template.HTML {
 
 func Str2html(raw string) template.HTML {
 	return template.HTML(markdown.Sanitizer.Sanitize(raw))
-}
-
-func Range(l int) []int {
-	return make([]int, l)
 }
 
 func List(l *list.List) chan interface{} {
@@ -136,7 +147,7 @@ func Sha1(str string) string {
 	return base.EncodeSha1(str)
 }
 
-func ToUtf8WithErr(content []byte) (error, string) {
+func ToUTF8WithErr(content []byte) (error, string) {
 	charsetLabel, err := base.DetectEncoding(content)
 	if err != nil {
 		return err, ""
@@ -159,8 +170,8 @@ func ToUtf8WithErr(content []byte) (error, string) {
 	return err, result
 }
 
-func ToUtf8(content string) string {
-	_, res := ToUtf8WithErr([]byte(content))
+func ToUTF8(content string) string {
+	_, res := ToUTF8WithErr([]byte(content))
 	return res
 }
 
@@ -217,7 +228,6 @@ func RenderCommitMessage(full bool, msg, urlPrefix string, metas map[string]stri
 type Actioner interface {
 	GetOpType() int
 	GetActUserName() string
-	GetActEmail() string
 	GetRepoUserName() string
 	GetRepoName() string
 	GetRepoPath() string
@@ -241,7 +251,7 @@ func ActionIcon(opType int) string {
 	case 7: // New pull request
 		return "git-pull-request"
 	case 10: // Comment issue
-		return "comment"
+		return "comment-discussion"
 	case 11: // Merge pull request
 		return "git-merge"
 	case 12, 14: // Close issue or pull request

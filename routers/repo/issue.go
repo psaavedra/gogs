@@ -22,7 +22,6 @@ import (
 	"github.com/gogits/gogs/modules/base"
 	"github.com/gogits/gogs/modules/context"
 	"github.com/gogits/gogs/modules/log"
-	"github.com/gogits/gogs/modules/mailer"
 	"github.com/gogits/gogs/modules/markdown"
 	"github.com/gogits/gogs/modules/setting"
 )
@@ -53,7 +52,7 @@ var (
 )
 
 func MustEnableIssues(ctx *context.Context) {
-	if !ctx.Repo.Repository.EnableIssues {
+	if !ctx.Repo.Repository.EnableIssues || ctx.Repo.Repository.EnableExternalTracker {
 		ctx.Handle(404, "MustEnableIssues", nil)
 		return
 	}
@@ -75,7 +74,7 @@ func MustAllowPulls(ctx *context.Context) {
 func RetrieveLabels(ctx *context.Context) {
 	labels, err := models.GetLabelsByRepoID(ctx.Repo.Repository.ID)
 	if err != nil {
-		ctx.Handle(500, "RetrieveLabels.GetLabels: %v", err)
+		ctx.Handle(500, "RetrieveLabels.GetLabels", err)
 		return
 	}
 	for _, l := range labels {
@@ -126,17 +125,17 @@ func Issues(ctx *context.Context) {
 	switch viewType {
 	case "assigned":
 		filterMode = models.FM_ASSIGN
-		assigneeID = ctx.User.Id
+		assigneeID = ctx.User.ID
 	case "created_by":
 		filterMode = models.FM_CREATE
-		posterID = ctx.User.Id
+		posterID = ctx.User.ID
 	case "mentioned":
 		filterMode = models.FM_MENTION
 	}
 
 	var uid int64 = -1
 	if ctx.IsSigned {
-		uid = ctx.User.Id
+		uid = ctx.User.ID
 	}
 
 	repo := ctx.Repo.Repository
@@ -164,7 +163,7 @@ func Issues(ctx *context.Context) {
 	} else {
 		total = int(issueStats.ClosedCount)
 	}
-	pager := paginater.New(total, setting.IssuePagingNum, page, 5)
+	pager := paginater.New(total, setting.UI.IssuePagingNum, page, 5)
 	ctx.Data["Page"] = pager
 
 	// Get issues.
@@ -182,14 +181,14 @@ func Issues(ctx *context.Context) {
 		SortType:    sortType,
 	})
 	if err != nil {
-		ctx.Handle(500, "Issues: %v", err)
+		ctx.Handle(500, "Issues", err)
 		return
 	}
 
 	// Get issue-user relations.
 	pairs, err := models.GetIssueUsers(repo.ID, posterID, isShowClosed)
 	if err != nil {
-		ctx.Handle(500, "GetIssueUsers: %v", err)
+		ctx.Handle(500, "GetIssueUsers", err)
 		return
 	}
 
@@ -201,7 +200,7 @@ func Issues(ctx *context.Context) {
 		}
 
 		// Check read status.
-		idx := models.PairsContains(pairs, issues[i].ID, ctx.User.Id)
+		idx := models.PairsContains(pairs, issues[i].ID, ctx.User.ID)
 		if idx > -1 {
 			issues[i].IsRead = pairs[idx].IsRead
 		} else {
@@ -213,15 +212,19 @@ func Issues(ctx *context.Context) {
 	// Get milestones.
 	ctx.Data["Milestones"], err = models.GetAllRepoMilestones(repo.ID)
 	if err != nil {
-		ctx.Handle(500, "GetAllRepoMilestones: %v", err)
+		ctx.Handle(500, "GetAllRepoMilestones", err)
 		return
 	}
 
 	// Get assignees.
 	ctx.Data["Assignees"], err = repo.GetAssignees()
 	if err != nil {
-		ctx.Handle(500, "GetAssignees: %v", err)
+		ctx.Handle(500, "GetAssignees", err)
 		return
+	}
+
+	if viewType == "assigned" {
+		assigneeID = 0 // Reset ID to prevent unexpected selection of assignee.
 	}
 
 	ctx.Data["IssueStats"] = issueStats
@@ -252,18 +255,18 @@ func RetrieveRepoMilestonesAndAssignees(ctx *context.Context, repo *models.Repos
 	var err error
 	ctx.Data["OpenMilestones"], err = models.GetMilestones(repo.ID, -1, false)
 	if err != nil {
-		ctx.Handle(500, "GetMilestones: %v", err)
+		ctx.Handle(500, "GetMilestones", err)
 		return
 	}
 	ctx.Data["ClosedMilestones"], err = models.GetMilestones(repo.ID, -1, true)
 	if err != nil {
-		ctx.Handle(500, "GetMilestones: %v", err)
+		ctx.Handle(500, "GetMilestones", err)
 		return
 	}
 
 	ctx.Data["Assignees"], err = repo.GetAssignees()
 	if err != nil {
-		ctx.Handle(500, "GetAssignees: %v", err)
+		ctx.Handle(500, "GetAssignees", err)
 		return
 	}
 }
@@ -275,7 +278,7 @@ func RetrieveRepoMetas(ctx *context.Context, repo *models.Repository) []*models.
 
 	labels, err := models.GetLabelsByRepoID(repo.ID)
 	if err != nil {
-		ctx.Handle(500, "GetLabelsByRepoID: %v", err)
+		ctx.Handle(500, "GetLabelsByRepoID", err)
 		return nil
 	}
 	ctx.Data["Labels"] = labels
@@ -337,6 +340,8 @@ func NewIssue(ctx *context.Context) {
 	}
 
 	ctx.Data["RequireHighlightJS"] = true
+	ctx.Data["RequireSimpleMDE"] = true
+	ctx.Data["RepoName"] = ctx.Repo.Repository.Name
 
 	ctx.HTML(200, ISSUE_NEW)
 }
@@ -375,7 +380,7 @@ func ValidateRepoMetas(ctx *context.Context, form auth.CreateIssueForm) ([]int64
 	if milestoneID > 0 {
 		ctx.Data["Milestone"], err = repo.GetMilestoneByID(milestoneID)
 		if err != nil {
-			ctx.Handle(500, "GetMilestoneByID: %v", err)
+			ctx.Handle(500, "GetMilestoneByID", err)
 			return nil, 0, 0
 		}
 		ctx.Data["milestone_id"] = milestoneID
@@ -386,7 +391,7 @@ func ValidateRepoMetas(ctx *context.Context, form auth.CreateIssueForm) ([]int64
 	if assigneeID > 0 {
 		ctx.Data["Assignee"], err = repo.GetAssigneeByID(assigneeID)
 		if err != nil {
-			ctx.Handle(500, "GetAssigneeByID: %v", err)
+			ctx.Handle(500, "GetAssigneeByID", err)
 			return nil, 0, 0
 		}
 		ctx.Data["assignee_id"] = assigneeID
@@ -395,49 +400,12 @@ func ValidateRepoMetas(ctx *context.Context, form auth.CreateIssueForm) ([]int64
 	return labelIDs, milestoneID, assigneeID
 }
 
-func MailWatchersAndMentions(ctx *context.Context, issue *models.Issue) error {
-	// Update mentions
-	mentions := markdown.MentionPattern.FindAllString(issue.Content, -1)
-	if len(mentions) > 0 {
-		for i := range mentions {
-			mentions[i] = strings.TrimSpace(mentions[i])[1:]
-		}
-
-		if err := models.UpdateMentions(mentions, issue.ID); err != nil {
-			return fmt.Errorf("UpdateMentions: %v", err)
-		}
-	}
-
-	repo := ctx.Repo.Repository
-
-	// Mail watchers and mentions.
-	if setting.Service.EnableNotifyMail {
-		tos, err := mailer.SendIssueNotifyMail(ctx.User, ctx.Repo.Owner, repo, issue)
-		if err != nil {
-			return fmt.Errorf("SendIssueNotifyMail: %v", err)
-		}
-
-		tos = append(tos, ctx.User.LowerName)
-		newTos := make([]string, 0, len(mentions))
-		for _, m := range mentions {
-			if com.IsSliceContainsStr(tos, m) {
-				continue
-			}
-
-			newTos = append(newTos, m)
-		}
-		if err = mailer.SendIssueMentionMail(ctx.Render, ctx.User, ctx.Repo.Owner,
-			repo, issue, models.GetUserEmailsByNames(newTos)); err != nil {
-			return fmt.Errorf("SendIssueMentionMail: %v", err)
-		}
-	}
-
-	return nil
-}
-
 func NewIssuePost(ctx *context.Context, form auth.CreateIssueForm) {
 	ctx.Data["Title"] = ctx.Tr("repo.issues.new")
 	ctx.Data["PageIsIssueList"] = true
+	ctx.Data["RepoName"] = ctx.Repo.Repository.Name
+	ctx.Data["RequireHighlightJS"] = true
+	ctx.Data["RequireSimpleMDE"] = true
 	renderAttachmentSettings(ctx)
 
 	var (
@@ -451,7 +419,7 @@ func NewIssuePost(ctx *context.Context, form auth.CreateIssueForm) {
 	}
 
 	if setting.AttachmentEnabled {
-		attachments = form.Attachments
+		attachments = form.Files
 	}
 
 	if ctx.HasError() {
@@ -461,8 +429,8 @@ func NewIssuePost(ctx *context.Context, form auth.CreateIssueForm) {
 
 	issue := &models.Issue{
 		RepoID:      repo.ID,
-		Name:        form.Title,
-		PosterID:    ctx.User.Id,
+		Title:       form.Title,
+		PosterID:    ctx.User.ID,
 		Poster:      ctx.User,
 		MilestoneID: milestoneID,
 		AssigneeID:  assigneeID,
@@ -470,9 +438,6 @@ func NewIssuePost(ctx *context.Context, form auth.CreateIssueForm) {
 	}
 	if err := models.NewIssue(repo, issue, labelIDs, attachments); err != nil {
 		ctx.Handle(500, "NewIssue", err)
-		return
-	} else if err := MailWatchersAndMentions(ctx, issue); err != nil {
-		ctx.Handle(500, "MailWatchersAndMentions", err)
 		return
 	}
 
@@ -540,7 +505,7 @@ func ViewIssue(ctx *context.Context) {
 		}
 		return
 	}
-	ctx.Data["Title"] = issue.Name
+	ctx.Data["Title"] = issue.Title
 
 	// Make sure type and URL matches.
 	if ctx.Params(":type") == "issues" && issue.IsPull {
@@ -557,12 +522,6 @@ func ViewIssue(ctx *context.Context) {
 			return
 		}
 		ctx.Data["PageIsPullList"] = true
-
-		if err = issue.GetPullRequest(); err != nil {
-			ctx.Handle(500, "GetPullRequest", err)
-			return
-		}
-
 		ctx.Data["PageIsPullConversation"] = true
 	} else {
 		MustEnableIssues(ctx)
@@ -579,8 +538,8 @@ func ViewIssue(ctx *context.Context) {
 
 	// Get more information if it's a pull request.
 	if issue.IsPull {
-		if issue.HasMerged {
-			ctx.Data["DisableStatusChange"] = issue.HasMerged
+		if issue.PullRequest.HasMerged {
+			ctx.Data["DisableStatusChange"] = issue.PullRequest.HasMerged
 			PrepareMergedViewPullInfo(ctx, issue)
 		} else {
 			PrepareViewPullInfo(ctx, issue)
@@ -598,7 +557,7 @@ func ViewIssue(ctx *context.Context) {
 	}
 	labels, err := models.GetLabelsByRepoID(repo.ID)
 	if err != nil {
-		ctx.Handle(500, "GetLabelsByRepoID: %v", err)
+		ctx.Handle(500, "GetLabelsByRepoID", err)
 		return
 	}
 	hasSelected := false
@@ -621,7 +580,7 @@ func ViewIssue(ctx *context.Context) {
 
 	if ctx.IsSigned {
 		// Update issue-user.
-		if err = issue.ReadBy(ctx.User.Id); err != nil {
+		if err = issue.ReadBy(ctx.User.ID); err != nil {
 			ctx.Handle(500, "ReadBy", err)
 			return
 		}
@@ -667,7 +626,7 @@ func ViewIssue(ctx *context.Context) {
 					break
 				}
 			}
-			if !isAdded && !issue.IsPoster(comment.Poster.Id) {
+			if !isAdded && !issue.IsPoster(comment.Poster.ID) {
 				participants = append(participants, comment.Poster)
 			}
 		}
@@ -676,10 +635,12 @@ func ViewIssue(ctx *context.Context) {
 	ctx.Data["Participants"] = participants
 	ctx.Data["NumParticipants"] = len(participants)
 	ctx.Data["Issue"] = issue
-	ctx.Data["IsIssueOwner"] = ctx.Repo.IsWriter() || (ctx.IsSigned && issue.IsPoster(ctx.User.Id))
-	ctx.Data["SignInLink"] = setting.AppSubUrl + "/user/login"
+	ctx.Data["IsIssueOwner"] = ctx.Repo.IsWriter() || (ctx.IsSigned && issue.IsPoster(ctx.User.ID))
+	ctx.Data["SignInLink"] = setting.AppSubUrl + "/user/login?redirect_to=" + ctx.Data["Link"].(string)
 
 	ctx.Data["RequireHighlightJS"] = true
+	ctx.Data["RequireSimpleMDE"] = true
+	ctx.Data["RepoName"] = ctx.Repo.Repository.Name
 
 	ctx.HTML(200, ISSUE_VIEW)
 }
@@ -703,24 +664,24 @@ func UpdateIssueTitle(ctx *context.Context) {
 		return
 	}
 
-	if !ctx.IsSigned || (!issue.IsPoster(ctx.User.Id) && !ctx.Repo.IsWriter()) {
+	if !ctx.IsSigned || (!issue.IsPoster(ctx.User.ID) && !ctx.Repo.IsWriter()) {
 		ctx.Error(403)
 		return
 	}
 
-	issue.Name = ctx.QueryTrim("title")
-	if len(issue.Name) == 0 {
+	title := ctx.QueryTrim("title")
+	if len(title) == 0 {
 		ctx.Error(204)
 		return
 	}
 
-	if err := models.UpdateIssue(issue); err != nil {
-		ctx.Handle(500, "UpdateIssue", err)
+	if err := issue.ChangeTitle(ctx.User, title); err != nil {
+		ctx.Handle(500, "ChangeTitle", err)
 		return
 	}
 
 	ctx.JSON(200, map[string]interface{}{
-		"title": issue.Name,
+		"title": issue.Title,
 	})
 }
 
@@ -730,14 +691,14 @@ func UpdateIssueContent(ctx *context.Context) {
 		return
 	}
 
-	if !ctx.IsSigned || (ctx.User.Id != issue.PosterID && !ctx.Repo.IsWriter()) {
+	if !ctx.IsSigned || (ctx.User.ID != issue.PosterID && !ctx.Repo.IsWriter()) {
 		ctx.Error(403)
 		return
 	}
 
-	issue.Content = ctx.Query("content")
-	if err := models.UpdateIssue(issue); err != nil {
-		ctx.Handle(500, "UpdateIssue", err)
+	content := ctx.Query("content")
+	if err := issue.ChangeContent(ctx.User, content); err != nil {
+		ctx.Handle(500, "ChangeContent", err)
 		return
 	}
 
@@ -753,7 +714,7 @@ func UpdateIssueLabel(ctx *context.Context) {
 	}
 
 	if ctx.Query("action") == "clear" {
-		if err := issue.ClearLabels(); err != nil {
+		if err := issue.ClearLabels(ctx.User); err != nil {
 			ctx.Handle(500, "ClearLabels", err)
 			return
 		}
@@ -770,12 +731,12 @@ func UpdateIssueLabel(ctx *context.Context) {
 		}
 
 		if isAttach && !issue.HasLabel(label.ID) {
-			if err = issue.AddLabel(label); err != nil {
+			if err = issue.AddLabel(ctx.User, label); err != nil {
 				ctx.Handle(500, "AddLabel", err)
 				return
 			}
 		} else if !isAttach && issue.HasLabel(label.ID) {
-			if err = issue.RemoveLabel(label); err != nil {
+			if err = issue.RemoveLabel(ctx.User, label); err != nil {
 				ctx.Handle(500, "RemoveLabel", err)
 				return
 			}
@@ -793,9 +754,9 @@ func UpdateIssueMilestone(ctx *context.Context) {
 		return
 	}
 
-	oldMid := issue.MilestoneID
-	mid := ctx.QueryInt64("id")
-	if oldMid == mid {
+	oldMilestoneID := issue.MilestoneID
+	milestoneID := ctx.QueryInt64("id")
+	if oldMilestoneID == milestoneID {
 		ctx.JSON(200, map[string]interface{}{
 			"ok": true,
 		})
@@ -803,8 +764,8 @@ func UpdateIssueMilestone(ctx *context.Context) {
 	}
 
 	// Not check for invalid milestone id and give responsibility to owners.
-	issue.MilestoneID = mid
-	if err := models.ChangeMilestoneAssign(oldMid, issue); err != nil {
+	issue.MilestoneID = milestoneID
+	if err := models.ChangeMilestoneAssign(issue, oldMilestoneID); err != nil {
 		ctx.Handle(500, "ChangeMilestoneAssign", err)
 		return
 	}
@@ -820,18 +781,16 @@ func UpdateIssueAssignee(ctx *context.Context) {
 		return
 	}
 
-	aid := ctx.QueryInt64("id")
-	if issue.AssigneeID == aid {
+	assigneeID := ctx.QueryInt64("id")
+	if issue.AssigneeID == assigneeID {
 		ctx.JSON(200, map[string]interface{}{
 			"ok": true,
 		})
 		return
 	}
 
-	// Not check for invalid assignee id and give responsibility to owners.
-	issue.AssigneeID = aid
-	if err := models.UpdateIssueUserByAssignee(issue); err != nil {
-		ctx.Handle(500, "UpdateIssueUserByAssignee: %v", err)
+	if err := issue.ChangeAssignee(ctx.User, assigneeID); err != nil {
+		ctx.Handle(500, "ChangeAssignee", err)
 		return
 	}
 
@@ -843,23 +802,13 @@ func UpdateIssueAssignee(ctx *context.Context) {
 func NewComment(ctx *context.Context, form auth.CreateCommentForm) {
 	issue, err := models.GetIssueByIndex(ctx.Repo.Repository.ID, ctx.ParamsInt64(":index"))
 	if err != nil {
-		if models.IsErrIssueNotExist(err) {
-			ctx.Handle(404, "GetIssueByIndex", err)
-		} else {
-			ctx.Handle(500, "GetIssueByIndex", err)
-		}
+		ctx.HandleError("GetIssueByIndex", models.IsErrIssueNotExist, err, 404)
 		return
-	}
-	if issue.IsPull {
-		if err = issue.GetPullRequest(); err != nil {
-			ctx.Handle(500, "GetPullRequest", err)
-			return
-		}
 	}
 
 	var attachments []string
 	if setting.AttachmentEnabled {
-		attachments = form.Attachments
+		attachments = form.Files
 	}
 
 	if ctx.HasError() {
@@ -871,9 +820,9 @@ func NewComment(ctx *context.Context, form auth.CreateCommentForm) {
 	var comment *models.Comment
 	defer func() {
 		// Check if issue admin/poster changes the status of issue.
-		if (ctx.Repo.IsWriter() || (ctx.IsSigned && issue.IsPoster(ctx.User.Id))) &&
+		if (ctx.Repo.IsWriter() || (ctx.IsSigned && issue.IsPoster(ctx.User.ID))) &&
 			(form.Status == "reopen" || form.Status == "close") &&
-			!(issue.IsPull && issue.HasMerged) {
+			!(issue.IsPull && issue.PullRequest.HasMerged) {
 
 			// Duplication and conflict check should apply to reopen pull request.
 			var pr *models.PullRequest
@@ -890,12 +839,12 @@ func NewComment(ctx *context.Context, form auth.CreateCommentForm) {
 
 				// Regenerate patch and test conflict.
 				if pr == nil {
-					if err = issue.UpdatePatch(); err != nil {
+					if err = issue.PullRequest.UpdatePatch(); err != nil {
 						ctx.Handle(500, "UpdatePatch", err)
 						return
 					}
 
-					issue.AddToTaskQueue()
+					issue.PullRequest.AddToTaskQueue()
 				}
 			}
 
@@ -933,31 +882,17 @@ func NewComment(ctx *context.Context, form auth.CreateCommentForm) {
 		return
 	}
 
-	MailWatchersAndMentions(ctx, &models.Issue{
-		ID:      issue.ID,
-		Index:   issue.Index,
-		Name:    issue.Name,
-		Content: form.Content,
-	})
-	if ctx.Written() {
-		return
-	}
-
 	log.Trace("Comment created: %d/%d/%d", ctx.Repo.Repository.ID, issue.ID, comment.ID)
 }
 
 func UpdateCommentContent(ctx *context.Context) {
 	comment, err := models.GetCommentByID(ctx.ParamsInt64(":id"))
 	if err != nil {
-		if models.IsErrCommentNotExist(err) {
-			ctx.Error(404, "GetCommentByID")
-		} else {
-			ctx.Handle(500, "GetCommentByID", err)
-		}
+		ctx.HandleError("GetCommentByID", models.IsErrCommentNotExist, err, 404)
 		return
 	}
 
-	if !ctx.IsSigned || (ctx.User.Id != comment.PosterID && !ctx.Repo.IsAdmin()) {
+	if !ctx.IsSigned || (ctx.User.ID != comment.PosterID && !ctx.Repo.IsAdmin()) {
 		ctx.Error(403)
 		return
 	} else if comment.Type != models.COMMENT_TYPE_COMMENT {
@@ -972,7 +907,7 @@ func UpdateCommentContent(ctx *context.Context) {
 		})
 		return
 	}
-	if err := models.UpdateComment(comment); err != nil {
+	if err = models.UpdateComment(comment); err != nil {
 		ctx.Handle(500, "UpdateComment", err)
 		return
 	}
@@ -980,6 +915,29 @@ func UpdateCommentContent(ctx *context.Context) {
 	ctx.JSON(200, map[string]interface{}{
 		"content": string(markdown.Render([]byte(comment.Content), ctx.Query("context"), ctx.Repo.Repository.ComposeMetas())),
 	})
+}
+
+func DeleteComment(ctx *context.Context) {
+	comment, err := models.GetCommentByID(ctx.ParamsInt64(":id"))
+	if err != nil {
+		ctx.HandleError("GetCommentByID", models.IsErrCommentNotExist, err, 404)
+		return
+	}
+
+	if !ctx.IsSigned || (ctx.User.ID != comment.PosterID && !ctx.Repo.IsAdmin()) {
+		ctx.Error(403)
+		return
+	} else if comment.Type != models.COMMENT_TYPE_COMMENT {
+		ctx.Error(204)
+		return
+	}
+
+	if err = models.DeleteCommentByID(comment.ID); err != nil {
+		ctx.Handle(500, "DeleteCommentByID", err)
+		return
+	}
+
+	ctx.Status(200)
 }
 
 func Labels(ctx *context.Context) {
@@ -1024,7 +982,6 @@ func UpdateLabel(ctx *context.Context, form auth.CreateLabelForm) {
 		return
 	}
 
-	fmt.Println(form.Title, form.Color)
 	l.Name = form.Title
 	l.Color = form.Color
 	if err := models.UpdateLabel(l); err != nil {
@@ -1068,7 +1025,7 @@ func Milestones(ctx *context.Context) {
 	} else {
 		total = int(closedCount)
 	}
-	ctx.Data["Page"] = paginater.New(total, setting.IssuePagingNum, page, 5)
+	ctx.Data["Page"] = paginater.New(total, setting.UI.IssuePagingNum, page, 5)
 
 	miles, err := models.GetMilestones(ctx.Repo.Repository.ID, page, isShowClosed)
 	if err != nil {

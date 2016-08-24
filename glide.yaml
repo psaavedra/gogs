@@ -40,6 +40,7 @@ import:
 - package: github.com/sergi/go-diff
   subpackages:
   - diffmatchpatch
+- package: github.com/strk/go-libravatar
 - package: golang.org/x/crypto
   subpackages:
   - ssh
@@ -51,6 +52,7 @@ import:
   subpackages:
   - transform
   - language
+- package: gopkg.in/editorconfig/editorconfig-core-go.v1
 - package: gopkg.in/gomail.v2
 - package: gopkg.in/ini.v1
 - package: gopkg.in/ldap.v2

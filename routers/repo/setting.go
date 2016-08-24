@@ -15,7 +15,6 @@ import (
 	"github.com/gogits/gogs/modules/base"
 	"github.com/gogits/gogs/modules/context"
 	"github.com/gogits/gogs/modules/log"
-	"github.com/gogits/gogs/modules/mailer"
 	"github.com/gogits/gogs/modules/setting"
 )
 
@@ -106,6 +105,15 @@ func SettingsPost(ctx *context.Context, form auth.RepoSettingForm) {
 		}
 
 		if repo.IsMirror {
+			if isNameChanged {
+				var err error
+				ctx.Repo.Mirror, err = models.GetMirror(repo.ID)
+				if err != nil {
+					ctx.Handle(500, "RefreshRepositoryMirror", err)
+					return
+				}
+			}
+
 			if form.Interval > 0 {
 				ctx.Repo.Mirror.EnablePrune = form.EnablePrune
 				ctx.Repo.Mirror.Interval = form.Interval
@@ -122,7 +130,7 @@ func SettingsPost(ctx *context.Context, form auth.RepoSettingForm) {
 		}
 
 		ctx.Flash.Success(ctx.Tr("repo.settings.update_settings_success"))
-		ctx.Redirect(repo.RepoLink() + "/settings")
+		ctx.Redirect(repo.Link() + "/settings")
 
 	case "advanced":
 		repo.EnableWiki = form.EnableWiki
@@ -154,7 +162,7 @@ func SettingsPost(ctx *context.Context, form auth.RepoSettingForm) {
 		}
 
 		if ctx.Repo.Owner.IsOrganization() {
-			if !ctx.Repo.Owner.IsOwnedBy(ctx.User.Id) {
+			if !ctx.Repo.Owner.IsOwnedBy(ctx.User.ID) {
 				ctx.Error(404)
 				return
 			}
@@ -166,7 +174,7 @@ func SettingsPost(ctx *context.Context, form auth.RepoSettingForm) {
 		}
 		repo.IsMirror = false
 
-		if _, err := models.CleanUpMigrateInfo(repo, models.RepoPath(ctx.Repo.Owner.Name, repo.Name)); err != nil {
+		if _, err := models.CleanUpMigrateInfo(repo); err != nil {
 			ctx.Handle(500, "CleanUpMigrateInfo", err)
 			return
 		} else if err = models.DeleteMirrorByRepoID(ctx.Repo.Repository.ID); err != nil {
@@ -188,7 +196,7 @@ func SettingsPost(ctx *context.Context, form auth.RepoSettingForm) {
 		}
 
 		if ctx.Repo.Owner.IsOrganization() {
-			if !ctx.Repo.Owner.IsOwnedBy(ctx.User.Id) {
+			if !ctx.Repo.Owner.IsOwnedBy(ctx.User.ID) {
 				ctx.Error(404)
 				return
 			}
@@ -227,13 +235,13 @@ func SettingsPost(ctx *context.Context, form auth.RepoSettingForm) {
 		}
 
 		if ctx.Repo.Owner.IsOrganization() {
-			if !ctx.Repo.Owner.IsOwnedBy(ctx.User.Id) {
+			if !ctx.Repo.Owner.IsOwnedBy(ctx.User.ID) {
 				ctx.Error(404)
 				return
 			}
 		}
 
-		if err := models.DeleteRepository(ctx.Repo.Owner.Id, repo.ID); err != nil {
+		if err := models.DeleteRepository(ctx.Repo.Owner.ID, repo.ID); err != nil {
 			ctx.Handle(500, "DeleteRepository", err)
 			return
 		}
@@ -253,7 +261,7 @@ func SettingsPost(ctx *context.Context, form auth.RepoSettingForm) {
 		}
 
 		if ctx.Repo.Owner.IsOrganization() {
-			if !ctx.Repo.Owner.IsOwnedBy(ctx.User.Id) {
+			if !ctx.Repo.Owner.IsOwnedBy(ctx.User.ID) {
 				ctx.Error(404)
 				return
 			}
@@ -313,7 +321,7 @@ func CollaborationPost(ctx *context.Context) {
 	}
 
 	// Check if user is organization member.
-	if ctx.Repo.Owner.IsOrganization() && ctx.Repo.Owner.IsOrgMember(u.Id) {
+	if ctx.Repo.Owner.IsOrganization() && ctx.Repo.Owner.IsOrgMember(u.ID) {
 		ctx.Flash.Info(ctx.Tr("repo.settings.user_is_org_member"))
 		ctx.Redirect(ctx.Repo.RepoLink + "/settings/collaboration")
 		return
@@ -325,10 +333,7 @@ func CollaborationPost(ctx *context.Context) {
 	}
 
 	if setting.Service.EnableNotifyMail {
-		if err = mailer.SendCollaboratorMail(ctx.Render, u, ctx.User, ctx.Repo.Repository); err != nil {
-			ctx.Handle(500, "SendCollaboratorMail", err)
-			return
-		}
+		models.SendCollaboratorMail(u, ctx.User, ctx.Repo.Repository)
 	}
 
 	ctx.Flash.Success(ctx.Tr("repo.settings.add_collaborator_success"))
@@ -366,7 +371,7 @@ func parseOwnerAndRepo(ctx *context.Context) (*models.User, *models.Repository) 
 		return nil, nil
 	}
 
-	repo, err := models.GetRepositoryByName(owner.Id, ctx.Params(":reponame"))
+	repo, err := models.GetRepositoryByName(owner.ID, ctx.Params(":reponame"))
 	if err != nil {
 		if models.IsErrRepoNotExist(err) {
 			ctx.Handle(404, "GetRepositoryByName", err)
