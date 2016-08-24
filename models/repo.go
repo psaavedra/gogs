@@ -1751,17 +1751,6 @@ func MirrorUpdate() {
 		}
 
 		repoPath := m.Repo.RepoPath()
-<<<<<<< HEAD
-
-		var gitArgs = []string{"remote", "update"}
-		if m.EnablePrune {
-			gitArgs = []string{"remote", "update", "--prune"}
-		}
-
-		if _, stderr, err := process.ExecDir(
-			time.Duration(setting.Git.Timeout.Mirror)*time.Second,
-			repoPath, fmt.Sprintf("MirrorUpdate: %s", repoPath),
-=======
 		wikiPath := m.Repo.WikiPath()
 		timeout := time.Duration(setting.Git.Timeout.Mirror) * time.Second
 
@@ -1772,7 +1761,6 @@ func MirrorUpdate() {
 
 		if _, stderr, err := process.ExecDir(
 			timeout, repoPath, fmt.Sprintf("MirrorUpdate: %s", repoPath),
->>>>>>> upstream/develop
 			"git", gitArgs...); err != nil {
 			desc := fmt.Sprintf("Fail to update mirror repository(%s): %s", repoPath, stderr)
 			log.Error(4, desc)
