@@ -20,7 +20,10 @@ import (
 	"github.com/gogits/gogs/modules/log"
 	"github.com/gogits/gogs/modules/process"
 	"github.com/gogits/gogs/modules/setting"
+	"github.com/gogits/gogs/modules/sync"
 )
+
+var PullRequestQueue = sync.NewUniqueQueue(setting.Repository.PullRequestQueueLength)
 
 type PullRequestType int
 
@@ -82,6 +85,20 @@ func (pr *PullRequest) AfterSet(colName string, _ xorm.Cell) {
 
 // Note: don't try to get Issue because will end up recursive querying.
 func (pr *PullRequest) loadAttributes(e Engine) (err error) {
+	if pr.HeadRepo == nil {
+		pr.HeadRepo, err = getRepositoryByID(e, pr.HeadRepoID)
+		if err != nil && !IsErrRepoNotExist(err) {
+			return fmt.Errorf("getRepositoryByID.(HeadRepo) [%d]: %v", pr.HeadRepoID, err)
+		}
+	}
+
+	if pr.BaseRepo == nil {
+		pr.BaseRepo, err = getRepositoryByID(e, pr.BaseRepoID)
+		if err != nil {
+			return fmt.Errorf("getRepositoryByID.(BaseRepo) [%d]: %v", pr.BaseRepoID, err)
+		}
+	}
+
 	if pr.HasMerged && pr.Merger == nil {
 		pr.Merger, err = getUserByID(e, pr.MergerID)
 		if IsErrUserNotExist(err) {
@@ -109,23 +126,37 @@ func (pr *PullRequest) LoadIssue() (err error) {
 }
 
 // This method assumes following fields have been assigned with valid values:
-// Required - Issue
-// Optional - Merger
+// Required - Issue, BaseRepo
+// Optional - HeadRepo, Merger
 func (pr *PullRequest) APIFormat() *api.PullRequest {
+	// In case of head repo has been deleted.
+	var apiHeadRepo *api.Repository
+	if pr.HeadRepo == nil {
+		apiHeadRepo = &api.Repository{
+			Name: "deleted",
+		}
+	} else {
+		apiHeadRepo = pr.HeadRepo.APIFormat(nil)
+	}
+
 	apiIssue := pr.Issue.APIFormat()
 	apiPullRequest := &api.PullRequest{
-		ID:        pr.ID,
-		Index:     pr.Index,
-		Poster:    apiIssue.Poster,
-		Title:     apiIssue.Title,
-		Body:      apiIssue.Body,
-		Labels:    apiIssue.Labels,
-		Milestone: apiIssue.Milestone,
-		Assignee:  apiIssue.Assignee,
-		State:     apiIssue.State,
-		Comments:  apiIssue.Comments,
-		HTMLURL:   pr.Issue.HTMLURL(),
-		HasMerged: pr.HasMerged,
+		ID:         pr.ID,
+		Index:      pr.Index,
+		Poster:     apiIssue.Poster,
+		Title:      apiIssue.Title,
+		Body:       apiIssue.Body,
+		Labels:     apiIssue.Labels,
+		Milestone:  apiIssue.Milestone,
+		Assignee:   apiIssue.Assignee,
+		State:      apiIssue.State,
+		Comments:   apiIssue.Comments,
+		HeadBranch: pr.HeadBranch,
+		HeadRepo:   apiHeadRepo,
+		BaseBranch: pr.BaseBranch,
+		BaseRepo:   pr.BaseRepo.APIFormat(nil),
+		HTMLURL:    pr.Issue.HTMLURL(),
+		HasMerged:  pr.HasMerged,
 	}
 
 	if pr.Status != PULL_REQUEST_STATUS_CHECKING {
@@ -141,30 +172,6 @@ func (pr *PullRequest) APIFormat() *api.PullRequest {
 	return apiPullRequest
 }
 
-func (pr *PullRequest) getHeadRepo(e Engine) (err error) {
-	pr.HeadRepo, err = getRepositoryByID(e, pr.HeadRepoID)
-	if err != nil && !IsErrRepoNotExist(err) {
-		return fmt.Errorf("getRepositoryByID(head): %v", err)
-	}
-	return nil
-}
-
-func (pr *PullRequest) GetHeadRepo() error {
-	return pr.getHeadRepo(x)
-}
-
-func (pr *PullRequest) GetBaseRepo() (err error) {
-	if pr.BaseRepo != nil {
-		return nil
-	}
-
-	pr.BaseRepo, err = GetRepositoryByID(pr.BaseRepoID)
-	if err != nil {
-		return fmt.Errorf("GetRepositoryByID(base): %v", err)
-	}
-	return nil
-}
-
 // IsChecking returns true if this pull request is still checking conflict.
 func (pr *PullRequest) IsChecking() bool {
 	return pr.Status == PULL_REQUEST_STATUS_CHECKING
@@ -178,12 +185,6 @@ func (pr *PullRequest) CanAutoMerge() bool {
 // Merge merges pull request to base repository.
 // FIXME: add repoWorkingPull make sure two merges does not happen at same time.
 func (pr *PullRequest) Merge(doer *User, baseGitRepo *git.Repository) (err error) {
-	if err = pr.GetHeadRepo(); err != nil {
-		return fmt.Errorf("GetHeadRepo: %v", err)
-	} else if err = pr.GetBaseRepo(); err != nil {
-		return fmt.Errorf("GetBaseRepo: %v", err)
-	}
-
 	defer func() {
 		go HookQueue.Add(pr.BaseRepo.ID)
 		go AddTestPullRequestTask(doer, pr.BaseRepo.ID, pr.BaseBranch, false)
@@ -339,9 +340,6 @@ var patchConflicts = []string{
 // testPatch checks if patch can be merged to base repository without conflit.
 // FIXME: make a mechanism to clean up stable local copies.
 func (pr *PullRequest) testPatch() (err error) {
-	repoWorkingPool.CheckIn(com.ToStr(pr.BaseRepoID))
-	defer repoWorkingPool.CheckOut(com.ToStr(pr.BaseRepoID))
-
 	if pr.BaseRepo == nil {
 		pr.BaseRepo, err = GetRepositoryByID(pr.BaseRepoID)
 		if err != nil {
@@ -359,6 +357,9 @@ func (pr *PullRequest) testPatch() (err error) {
 		log.Trace("PullRequest[%d].testPatch: ignored cruppted data", pr.ID)
 		return nil
 	}
+
+	repoWorkingPool.CheckIn(com.ToStr(pr.BaseRepoID))
+	defer repoWorkingPool.CheckOut(com.ToStr(pr.BaseRepoID))
 
 	log.Trace("PullRequest[%d].testPatch (patchPath): %s", pr.ID, patchPath)
 
@@ -537,19 +538,11 @@ func (pr *PullRequest) UpdateCols(cols ...string) error {
 	return err
 }
 
-var PullRequestQueue = NewUniqueQueue(setting.Repository.PullRequestQueueLength)
-
 // UpdatePatch generates and saves a new patch.
 func (pr *PullRequest) UpdatePatch() (err error) {
-	if err = pr.GetHeadRepo(); err != nil {
-		return fmt.Errorf("GetHeadRepo: %v", err)
-	} else if pr.HeadRepo == nil {
+	if pr.HeadRepo == nil {
 		log.Trace("PullRequest[%d].UpdatePatch: ignored cruppted data", pr.ID)
 		return nil
-	}
-
-	if err = pr.GetBaseRepo(); err != nil {
-		return fmt.Errorf("GetBaseRepo: %v", err)
 	}
 
 	headGitRepo, err := git.OpenRepository(pr.HeadRepo.RepoPath())
@@ -756,8 +749,8 @@ func TestPullRequests() {
 		func(idx int, bean interface{}) error {
 			pr := bean.(*PullRequest)
 
-			if err := pr.GetBaseRepo(); err != nil {
-				log.Error(3, "GetBaseRepo: %v", err)
+			if err := pr.LoadAttributes(); err != nil {
+				log.Error(3, "LoadAttributes: %v", err)
 				return nil
 			}
 
@@ -781,7 +774,7 @@ func TestPullRequests() {
 
 		pr, err := GetPullRequestByID(com.StrTo(prID).MustInt64())
 		if err != nil {
-			log.Error(4, "GetPullRequestByID[%d]: %v", prID, err)
+			log.Error(4, "GetPullRequestByID[%s]: %v", prID, err)
 			continue
 		} else if err = pr.testPatch(); err != nil {
 			log.Error(4, "testPatch[%d]: %v", pr.ID, err)

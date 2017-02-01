@@ -41,7 +41,7 @@ type Repository struct {
 	GitRepo      *git.Repository
 	BranchName   string
 	TagName      string
-	TreeName     string
+	TreePath     string
 	CommitID     string
 	RepoLink     string
 	CloneLink    models.CloneLink
@@ -69,6 +69,11 @@ func (r *Repository) IsWriter() bool {
 // HasAccess returns true if the current user has at least read access for this repository
 func (r *Repository) HasAccess() bool {
 	return r.AccessMode >= models.ACCESS_MODE_READ
+}
+
+// CanEnableEditor returns true if repository is editable and user has proper access level.
+func (r *Repository) CanEnableEditor() bool {
+	return r.Repository.CanEnableEditor() && r.IsViewBranch && r.IsWriter()
 }
 
 // GetEditorconfig returns the .editorconfig definition if found in the
@@ -167,6 +172,7 @@ func RepoAssignment(args ...bool) macaron.Handler {
 			}
 		}
 		ctx.Repo.Owner = owner
+		ctx.Data["Username"] = ctx.Repo.Owner.Name
 
 		// Get repository.
 		repo, err := models.GetRepositoryByName(owner.ID, repoName)
@@ -210,7 +216,7 @@ func RepoAssignment(args ...bool) macaron.Handler {
 		ctx.Data["HasAccess"] = true
 
 		if repo.IsMirror {
-			ctx.Repo.Mirror, err = models.GetMirror(repo.ID)
+			ctx.Repo.Mirror, err = models.GetMirrorByRepoID(repo.ID)
 			if err != nil {
 				ctx.Handle(500, "GetMirror", err)
 				return
@@ -221,6 +227,7 @@ func RepoAssignment(args ...bool) macaron.Handler {
 		}
 
 		ctx.Repo.Repository = repo
+		ctx.Data["RepoName"] = ctx.Repo.Repository.Name
 		ctx.Data["IsBareRepo"] = ctx.Repo.Repository.IsBare
 
 		gitRepo, err := git.OpenRepository(models.RepoPath(userName, repoName))
@@ -249,6 +256,7 @@ func RepoAssignment(args ...bool) macaron.Handler {
 		ctx.Data["IsRepositoryWriter"] = ctx.Repo.IsWriter()
 
 		ctx.Data["DisableSSH"] = setting.SSH.Disabled
+		ctx.Data["DisableHTTP"] = setting.Repository.DisableHTTPGit
 		ctx.Data["CloneLink"] = repo.CloneLink()
 		ctx.Data["WikiCloneLink"] = repo.WikiCloneLink()
 
@@ -292,37 +300,6 @@ func RepoAssignment(args ...bool) macaron.Handler {
 		ctx.Data["BranchName"] = ctx.Repo.BranchName
 		ctx.Data["CommitID"] = ctx.Repo.CommitID
 
-		if repo.IsFork {
-			RetrieveBaseRepo(ctx, repo)
-			if ctx.Written() {
-				return
-			}
-		}
-
-		// People who have push access or have fored repository can propose a new pull request.
-		if ctx.Repo.IsWriter() || (ctx.IsSigned && ctx.User.HasForkedRepo(ctx.Repo.Repository.ID)) {
-			// Pull request is allowed if this is a fork repository
-			// and base repository accepts pull requests.
-			if repo.BaseRepo != nil {
-				if repo.BaseRepo.AllowsPulls() {
-					ctx.Data["BaseRepo"] = repo.BaseRepo
-					ctx.Repo.PullRequest.BaseRepo = repo.BaseRepo
-					ctx.Repo.PullRequest.Allowed = true
-					ctx.Repo.PullRequest.HeadInfo = ctx.Repo.Owner.Name + ":" + ctx.Repo.BranchName
-				}
-			} else {
-				// Or, this is repository accepts pull requests between branches.
-				if repo.AllowsPulls() {
-					ctx.Data["BaseRepo"] = repo
-					ctx.Repo.PullRequest.BaseRepo = repo
-					ctx.Repo.PullRequest.Allowed = true
-					ctx.Repo.PullRequest.SameRepo = true
-					ctx.Repo.PullRequest.HeadInfo = ctx.Repo.BranchName
-				}
-			}
-		}
-		ctx.Data["PullRequestCtx"] = ctx.Repo.PullRequest
-
 		if ctx.Query("go-get") == "1" {
 			ctx.Data["GoGetImport"] = composeGoGetImport(owner.Name, repo.Name)
 			prefix := setting.AppUrl + path.Join(owner.Name, repo.Name, "src", ctx.Repo.BranchName)
@@ -348,12 +325,11 @@ func RepoRef() macaron.Handler {
 		// For API calls.
 		if ctx.Repo.GitRepo == nil {
 			repoPath := models.RepoPath(ctx.Repo.Owner.Name, ctx.Repo.Repository.Name)
-			gitRepo, err := git.OpenRepository(repoPath)
+			ctx.Repo.GitRepo, err = git.OpenRepository(repoPath)
 			if err != nil {
 				ctx.Handle(500, "RepoRef Invalid repo "+repoPath, err)
 				return
 			}
-			ctx.Repo.GitRepo = gitRepo
 		}
 
 		// Get default branch.
@@ -384,7 +360,7 @@ func RepoRef() macaron.Handler {
 				if ctx.Repo.GitRepo.IsBranchExist(refName) ||
 					ctx.Repo.GitRepo.IsTagExist(refName) {
 					if i < len(parts)-1 {
-						ctx.Repo.TreeName = strings.Join(parts[i+1:], "/")
+						ctx.Repo.TreePath = strings.Join(parts[i+1:], "/")
 					}
 					hasMatched = true
 					break
@@ -392,7 +368,7 @@ func RepoRef() macaron.Handler {
 			}
 			if !hasMatched && len(parts[0]) == 40 {
 				refName = parts[0]
-				ctx.Repo.TreeName = strings.Join(parts[1:], "/")
+				ctx.Repo.TreePath = strings.Join(parts[1:], "/")
 			}
 
 			if ctx.Repo.GitRepo.IsBranchExist(refName) {
@@ -431,9 +407,41 @@ func RepoRef() macaron.Handler {
 		ctx.Repo.BranchName = refName
 		ctx.Data["BranchName"] = ctx.Repo.BranchName
 		ctx.Data["CommitID"] = ctx.Repo.CommitID
+		ctx.Data["TreePath"] = ctx.Repo.TreePath
 		ctx.Data["IsViewBranch"] = ctx.Repo.IsViewBranch
 		ctx.Data["IsViewTag"] = ctx.Repo.IsViewTag
 		ctx.Data["IsViewCommit"] = ctx.Repo.IsViewCommit
+
+		if ctx.Repo.Repository.IsFork {
+			RetrieveBaseRepo(ctx, ctx.Repo.Repository)
+			if ctx.Written() {
+				return
+			}
+		}
+
+		// People who have push access or have fored repository can propose a new pull request.
+		if ctx.Repo.IsWriter() || (ctx.IsSigned && ctx.User.HasForkedRepo(ctx.Repo.Repository.ID)) {
+			// Pull request is allowed if this is a fork repository
+			// and base repository accepts pull requests.
+			if ctx.Repo.Repository.BaseRepo != nil {
+				if ctx.Repo.Repository.BaseRepo.AllowsPulls() {
+					ctx.Data["BaseRepo"] = ctx.Repo.Repository.BaseRepo
+					ctx.Repo.PullRequest.BaseRepo = ctx.Repo.Repository.BaseRepo
+					ctx.Repo.PullRequest.Allowed = true
+					ctx.Repo.PullRequest.HeadInfo = ctx.Repo.Owner.Name + ":" + ctx.Repo.BranchName
+				}
+			} else {
+				// Or, this is repository accepts pull requests between branches.
+				if ctx.Repo.Repository.AllowsPulls() {
+					ctx.Data["BaseRepo"] = ctx.Repo.Repository
+					ctx.Repo.PullRequest.BaseRepo = ctx.Repo.Repository
+					ctx.Repo.PullRequest.Allowed = true
+					ctx.Repo.PullRequest.SameRepo = true
+					ctx.Repo.PullRequest.HeadInfo = ctx.Repo.BranchName
+				}
+			}
+		}
+		ctx.Data["PullRequestCtx"] = ctx.Repo.PullRequest
 
 		ctx.Repo.CommitsCount, err = ctx.Repo.Commit.CommitsCount()
 		if err != nil {

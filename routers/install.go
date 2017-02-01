@@ -38,12 +38,10 @@ const (
 )
 
 func checkRunMode() {
-	switch setting.Cfg.Section("").Key("RUN_MODE").String() {
-	case "prod":
+	if setting.ProdMode {
 		macaron.Env = macaron.PROD
 		macaron.ColorLog = false
-		setting.ProdMode = true
-	default:
+	} else {
 		git.Debug = true
 	}
 	log.Info("Run Mode: %s", strings.Title(macaron.Env))
@@ -57,22 +55,25 @@ func NewServices() {
 // GlobalInit is for global configuration reload-able.
 func GlobalInit() {
 	setting.NewContext()
-	highlight.NewContext()
 	log.Trace("Custom path: %s", setting.CustomPath)
 	log.Trace("Log path: %s", setting.LogRootPath)
 	models.LoadConfigs()
 	NewServices()
 
 	if setting.InstallLock {
-		models.LoadRepoConfig()
-		models.NewRepoContext()
-
+		highlight.NewContext()
+		markdown.BuildSanitizer()
 		if err := models.NewEngine(); err != nil {
 			log.Fatal(4, "Fail to initialize ORM engine: %v", err)
 		}
-
 		models.HasEngine = true
+
+		models.LoadRepoConfig()
+		models.NewRepoContext()
+
+		// Booting long running goroutines.
 		cron.NewContext()
+		models.InitSyncMirrors()
 		models.InitDeliverHooks()
 		models.InitTestPullRequests()
 		log.NewGitLogger(path.Join(setting.LogRootPath, "http.log"))
@@ -88,13 +89,10 @@ func GlobalInit() {
 	}
 	checkRunMode()
 
-	if setting.SSH.StartBuiltinServer {
-		ssh.Listen(setting.SSH.ListenPort)
-		log.Info("SSH server started on :%v", setting.SSH.ListenPort)
+	if setting.InstallLock && setting.SSH.StartBuiltinServer {
+		ssh.Listen(setting.SSH.ListenHost, setting.SSH.ListenPort)
+		log.Info("SSH server started on %s:%v", setting.SSH.ListenHost, setting.SSH.ListenPort)
 	}
-
-	// Build Sanitizer
-	markdown.BuildSanitizer()
 }
 
 func InstallInit(ctx *context.Context) {
@@ -343,7 +341,12 @@ func InstallPost(ctx *context.Context, form auth.InstallForm) {
 	cfg.Section("log").Key("ROOT_PATH").SetValue(form.LogRootPath)
 
 	cfg.Section("security").Key("INSTALL_LOCK").SetValue("true")
-	cfg.Section("security").Key("SECRET_KEY").SetValue(base.GetRandomString(15))
+	secretKey, err := base.GetRandomString(15)
+	if err != nil {
+		ctx.RenderWithErr(ctx.Tr("install.secret_key_failed", err), INSTALL, &form)
+		return
+	}
+	cfg.Section("security").Key("SECRET_KEY").SetValue(secretKey)
 
 	os.MkdirAll(filepath.Dir(setting.CustomConf), os.ModePerm)
 	if err := cfg.SaveTo(setting.CustomConf); err != nil {

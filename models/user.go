@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"container/list"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"github.com/Unknwon/com"
 	"github.com/go-xorm/xorm"
 	"github.com/nfnt/resize"
+	"golang.org/x/crypto/pbkdf2"
 
 	"github.com/gogits/git-module"
 	api "github.com/gogits/go-gogs-client"
@@ -46,7 +48,6 @@ var (
 	ErrEmailNotExist         = errors.New("E-mail does not exist")
 	ErrEmailNotActivated     = errors.New("E-mail address has not been activated")
 	ErrUserNameIllegal       = errors.New("User name contains illegal characters")
-	ErrLoginSourceNotExist   = errors.New("Login source does not exist")
 	ErrLoginSourceNotActived = errors.New("Login source is not actived")
 	ErrUnsupportedLoginType  = errors.New("Login source is unknown")
 )
@@ -176,7 +177,7 @@ func (u *User) CanEditGitHook() bool {
 
 // CanImportLocal returns true if user can migrate repository by local path.
 func (u *User) CanImportLocal() bool {
-	return u.IsAdmin || u.AllowImportLocal
+	return setting.Repository.EnableLocalPathMigration && (u.IsAdmin || u.AllowImportLocal)
 }
 
 // DashboardLink returns the user dashboard page link.
@@ -272,7 +273,7 @@ func (u *User) RelAvatarLink() string {
 func (u *User) AvatarLink() string {
 	link := u.RelAvatarLink()
 	if link[0] == '/' && link[1] != '/' {
-		return setting.AppUrl + link[1:]
+		return setting.AppUrl + strings.TrimPrefix(link, setting.AppSubUrl)[1:]
 	}
 	return link
 }
@@ -308,7 +309,7 @@ func (u *User) GetFollowing(page int) ([]*User, error) {
 // NewGitSig generates and returns the signature of given user.
 func (u *User) NewGitSig() *git.Signature {
 	return &git.Signature{
-		Name:  u.Name,
+		Name:  u.DisplayName(),
 		Email: u.Email,
 		When:  time.Now(),
 	}
@@ -316,7 +317,7 @@ func (u *User) NewGitSig() *git.Signature {
 
 // EncodePasswd encodes password to safe format.
 func (u *User) EncodePasswd() {
-	newPasswd := base.PBKDF2([]byte(u.Passwd), []byte(u.Salt), 10000, 50, sha256.New)
+	newPasswd := pbkdf2.Key([]byte(u.Passwd), []byte(u.Salt), 10000, 50, sha256.New)
 	u.Passwd = fmt.Sprintf("%x", newPasswd)
 }
 
@@ -324,7 +325,7 @@ func (u *User) EncodePasswd() {
 func (u *User) ValidatePassword(passwd string) bool {
 	newUser := &User{Passwd: passwd, Salt: u.Salt}
 	newUser.EncodePasswd()
-	return u.Passwd == newUser.Passwd
+	return subtle.ConstantTimeCompare([]byte(u.Passwd), []byte(newUser.Passwd)) == 1
 }
 
 // UploadAvatar saves custom avatar for user.
@@ -418,7 +419,12 @@ func (u *User) GetOrganizationCount() (int64, error) {
 
 // GetRepositories returns repositories that user owns, including private repositories.
 func (u *User) GetRepositories(page, pageSize int) (err error) {
-	u.Repos, err = GetUserRepositories(u.ID, true, page, pageSize)
+	u.Repos, err = GetUserRepositories(&UserRepoOptions{
+		UserID:   u.ID,
+		Private:  true,
+		Page:     page,
+		PageSize: pageSize,
+	})
 	return err
 }
 
@@ -463,6 +469,12 @@ func (u *User) ShortName(length int) string {
 	return base.EllipsisString(u.Name, length)
 }
 
+// IsMailable checks if a user is elegible
+// to receive emails.
+func (u *User) IsMailable() bool {
+	return u.IsActive
+}
+
 // IsUserExist checks if given user name exist,
 // the user name should be noncased unique.
 // If uid is presented, then check will rule out that one,
@@ -475,7 +487,7 @@ func IsUserExist(uid int64, name string) (bool, error) {
 }
 
 // GetUserSalt returns a ramdom user salt token.
-func GetUserSalt() string {
+func GetUserSalt() (string, error) {
 	return base.GetRandomString(10)
 }
 
@@ -489,12 +501,12 @@ func NewGhostUser() *User {
 }
 
 var (
-	reversedUsernames    = []string{"debug", "raw", "install", "api", "avatar", "user", "org", "help", "stars", "issues", "pulls", "commits", "repo", "template", "admin", "new", ".", ".."}
-	reversedUserPatterns = []string{"*.keys"}
+	reservedUsernames    = []string{"assets", "css", "img", "js", "less", "plugins", "debug", "raw", "install", "api", "avatar", "user", "org", "help", "stars", "issues", "pulls", "commits", "repo", "template", "admin", "new", ".", ".."}
+	reservedUserPatterns = []string{"*.keys"}
 )
 
 // isUsableName checks if name is reserved or pattern of name is not allowed
-// based on given reversed names and patterns.
+// based on given reserved names and patterns.
 // Names are exact match, patterns can be prefix or suffix match with placeholder '*'.
 func isUsableName(names, patterns []string, name string) error {
 	name = strings.TrimSpace(strings.ToLower(name))
@@ -519,7 +531,7 @@ func isUsableName(names, patterns []string, name string) error {
 }
 
 func IsUsableUsername(name string) error {
-	return isUsableName(reversedUsernames, reversedUserPatterns, name)
+	return isUsableName(reservedUsernames, reservedUserPatterns, name)
 }
 
 // CreateUser creates record of a new user.
@@ -546,8 +558,12 @@ func CreateUser(u *User) (err error) {
 	u.LowerName = strings.ToLower(u.Name)
 	u.AvatarEmail = u.Email
 	u.Avatar = base.HashEmail(u.AvatarEmail)
-	u.Rands = GetUserSalt()
-	u.Salt = GetUserSalt()
+	if u.Rands, err = GetUserSalt(); err != nil {
+		return err
+	}
+	if u.Salt, err = GetUserSalt(); err != nil {
+		return err
+	}
 	u.EncodePasswd()
 	u.MaxRepoCreation = -1
 
@@ -919,7 +935,9 @@ func GetUserEmailsByNames(names []string) []string {
 		if err != nil {
 			continue
 		}
-		mails = append(mails, u.Email)
+		if u.IsMailable() {
+			mails = append(mails, u.Email)
+		}
 	}
 	return mails
 }

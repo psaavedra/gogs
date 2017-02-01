@@ -110,6 +110,15 @@ func reqAdmin() macaron.Handler {
 	}
 }
 
+func reqRepoWriter() macaron.Handler {
+	return func(ctx *context.Context) {
+		if !ctx.Repo.IsWriter() {
+			ctx.Error(403)
+			return
+		}
+	}
+}
+
 func orgAssignment(args ...bool) macaron.Handler {
 	var (
 		assignOrg  bool
@@ -238,6 +247,7 @@ func RegisterRoutes(m *macaron.Macaron) {
 				m.Put("/collaborators/:collaborator", bind(api.AddCollaboratorOption{}), repo.AddCollaborator)
 				m.Get("/raw/*", context.RepoRef(), repo.GetRawFile)
 				m.Get("/archive/*", repo.GetArchive)
+				m.Get("/forks", repo.ListForks)
 				m.Group("/branches", func() {
 					m.Get("", repo.ListBranches)
 					m.Get("/:branchname", repo.GetBranch)
@@ -250,8 +260,19 @@ func RegisterRoutes(m *macaron.Macaron) {
 				})
 				m.Group("/issues", func() {
 					m.Combo("").Get(repo.ListIssues).Post(bind(api.CreateIssueOption{}), repo.CreateIssue)
+					m.Group("/comments", func() {
+						m.Get("", repo.ListRepoIssueComments)
+						m.Combo("/:id").Patch(bind(api.EditIssueCommentOption{}), repo.EditIssueComment)
+					})
 					m.Group("/:index", func() {
 						m.Combo("").Get(repo.GetIssue).Patch(bind(api.EditIssueOption{}), repo.EditIssue)
+
+						m.Group("/comments", func() {
+							m.Combo("").Get(repo.ListIssueComments).Post(bind(api.CreateIssueCommentOption{}), repo.CreateIssueComment)
+							m.Combo("/:id").Patch(bind(api.EditIssueCommentOption{}), repo.EditIssueComment).
+								Delete(repo.DeleteIssueComment)
+						})
+
 						m.Group("/labels", func() {
 							m.Combo("").Get(repo.ListIssueLabels).
 								Post(bind(api.IssueLabelsOption{}), repo.AddIssueLabels).
@@ -268,6 +289,14 @@ func RegisterRoutes(m *macaron.Macaron) {
 					m.Combo("/:id").Get(repo.GetLabel).Patch(bind(api.EditLabelOption{}), repo.EditLabel).
 						Delete(repo.DeleteLabel)
 				})
+				m.Group("/milestones", func() {
+					m.Combo("").Get(repo.ListMilestones).
+						Post(reqRepoWriter(), bind(api.CreateMilestoneOption{}), repo.CreateMilestone)
+					m.Combo("/:id").Get(repo.GetMilestone).
+						Patch(reqRepoWriter(), bind(api.EditMilestoneOption{}), repo.EditMilestone).
+						Delete(reqRepoWriter(), repo.DeleteMilestone)
+				})
+				m.Get("/editorconfig/:filename", context.RepoRef(), repo.GetEditorconfig)
 			}, repoAssignment())
 		}, reqToken())
 

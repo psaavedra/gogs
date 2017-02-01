@@ -146,13 +146,18 @@ func NewAuthSourcePost(ctx *context.Context, form auth.AuthenticationForm) {
 		return
 	}
 
-	if err := models.CreateSource(&models.LoginSource{
+	if err := models.CreateLoginSource(&models.LoginSource{
 		Type:      models.LoginType(form.Type),
 		Name:      form.Name,
 		IsActived: form.IsActive,
 		Cfg:       config,
 	}); err != nil {
-		ctx.Handle(500, "CreateSource", err)
+		if models.IsErrLoginSourceAlreadyExist(err) {
+			ctx.Data["Err_Name"] = true
+			ctx.RenderWithErr(ctx.Tr("admin.auths.login_source_exist", err.(models.ErrLoginSourceAlreadyExist).Name), AUTH_NEW, form)
+		} else {
+			ctx.Handle(500, "CreateSource", err)
+		}
 		return
 	}
 
@@ -223,7 +228,7 @@ func EditAuthSourcePost(ctx *context.Context, form auth.AuthenticationForm) {
 		ctx.Handle(500, "UpdateSource", err)
 		return
 	}
-	log.Trace("Authentication changed by admin(%s): %s", ctx.User.Name, source.ID)
+	log.Trace("Authentication changed by admin(%s): %d", ctx.User.Name, source.ID)
 
 	ctx.Flash.Success(ctx.Tr("admin.auths.update_success"))
 	ctx.Redirect(setting.AppSubUrl + "/admin/auths/" + com.ToStr(form.ID))
@@ -237,10 +242,9 @@ func DeleteAuthSource(ctx *context.Context) {
 	}
 
 	if err = models.DeleteSource(source); err != nil {
-		switch err {
-		case models.ErrAuthenticationUserUsed:
+		if models.IsErrLoginSourceInUse(err) {
 			ctx.Flash.Error(ctx.Tr("admin.auths.still_in_used"))
-		default:
+		} else {
 			ctx.Flash.Error(fmt.Sprintf("DeleteSource: %v", err))
 		}
 		ctx.JSON(200, map[string]interface{}{

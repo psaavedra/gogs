@@ -5,6 +5,8 @@ DATA_FILES := $(shell find conf | sed 's/ /\\ /g')
 LESS_FILES := $(wildcard public/less/gogs.less public/less/_*.less)
 GENERATED  := modules/bindata/bindata.go public/css/gogs.css
 
+OS := $(shell uname)
+
 TAGS = ""
 BUILD_FLAGS = "-v"
 
@@ -17,8 +19,14 @@ GOVET = go tool vet -composites=false -methods=false -structtags=false
 
 .IGNORE: public/css/gogs.css
 
+all: build
+
+check: test
+
+dist: release
+
 govet:
-	$(GOVET) gogs.go 
+	$(GOVET) gogs.go
 	$(GOVET) models modules routers
 
 build: $(GENERATED)

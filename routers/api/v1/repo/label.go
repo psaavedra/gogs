@@ -26,7 +26,7 @@ func ListLabels(ctx *context.APIContext) {
 }
 
 func GetLabel(ctx *context.APIContext) {
-	label, err := models.GetLabelInRepoByID(ctx.Repo.Repository.ID, ctx.ParamsInt64(":id"))
+	label, err := models.GetLabelOfRepoByID(ctx.Repo.Repository.ID, ctx.ParamsInt64(":id"))
 	if err != nil {
 		if models.IsErrLabelNotExist(err) {
 			ctx.Status(404)
@@ -50,7 +50,7 @@ func CreateLabel(ctx *context.APIContext, form api.CreateLabelOption) {
 		Color:  form.Color,
 		RepoID: ctx.Repo.Repository.ID,
 	}
-	if err := models.NewLabel(label); err != nil {
+	if err := models.NewLabels(label); err != nil {
 		ctx.Error(500, "NewLabel", err)
 		return
 	}
@@ -63,7 +63,7 @@ func EditLabel(ctx *context.APIContext, form api.EditLabelOption) {
 		return
 	}
 
-	label, err := models.GetLabelInRepoByID(ctx.Repo.Repository.ID, ctx.ParamsInt64(":id"))
+	label, err := models.GetLabelOfRepoByID(ctx.Repo.Repository.ID, ctx.ParamsInt64(":id"))
 	if err != nil {
 		if models.IsErrLabelNotExist(err) {
 			ctx.Status(404)

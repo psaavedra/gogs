@@ -126,7 +126,8 @@
 
 	#clone-panel {
 		margin-top: -8px;
-		width: 100%;
+		margin-left: 5px;
+		width: 350px;
 
 		input {
 			border-radius: 0;
@@ -161,9 +162,9 @@
 		#file-buttons {
 			font-weight: normal;
 			margin-top: -3px;
-			padding-right: 20px;
 			.ui.button {
 				padding: 8px 10px;
+				font-weight: normal;
 			}
 		}
 
@@ -246,10 +247,14 @@
 					max-width: 100%;
 				}
 				img {
-					padding: 5px 5px 0 5px;
+					margin-bottom: -5px;
 				}
 			}
 
+			.plain-text {
+				font-size: 14px;
+				padding: 10px 15px;
+			}
 			.code-view {
 				* {
 					font-size: 12px;
@@ -277,8 +282,6 @@
 				.lines-num,
 				.lines-code {
 					padding: 0;
-
-
 					pre,
 					ol,
 					.hljs {
@@ -286,11 +289,13 @@
 						margin: 0;
 						padding: 0 !important;
 						li {
-							padding-left: 5px;
 							display: inline-block;
 							width: 100%;
 							&.active {
 								background: #ffffdd;
+							}
+							&:before {
+								content: ' ';
 							}
 						}
 					}
@@ -1153,7 +1158,7 @@
 			.ui.sub.header {
 				text-transform: none;
 			}
-			.markdown {
+			>.markdown {
 				padding: 15px 30px;
 
 				h1, h2, h3, h4, h5, h6 {
@@ -1303,7 +1308,7 @@
 	padding-top: 15px;
 }
 
-.ui.comments {
+.ui.form {
 	.dropzone {
 		width: 100%;
 		margin-bottom: 10px;

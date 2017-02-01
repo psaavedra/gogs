@@ -1,4 +1,4 @@
-// +build go1.4
+// +build go1.5
 
 // Copyright 2014 The Gogs Authors. All rights reserved.
 // Use of this source code is governed by a MIT-style
@@ -9,18 +9,16 @@ package main
 
 import (
 	"os"
-	"runtime"
 
-	"github.com/codegangsta/cli"
+	"github.com/urfave/cli"
 
 	"github.com/gogits/gogs/cmd"
 	"github.com/gogits/gogs/modules/setting"
 )
 
-const APP_VER = "0.9.83.0816"
+const APP_VER = "0.9.128.0131"
 
 func init() {
-	runtime.GOMAXPROCS(runtime.NumCPU())
 	setting.AppVer = APP_VER
 }
 
@@ -36,6 +34,7 @@ func main() {
 		cmd.CmdDump,
 		cmd.CmdCert,
 		cmd.CmdAdmin,
+		cmd.CmdImport,
 	}
 	app.Flags = append(app.Flags, []cli.Flag{}...)
 	app.Run(os.Args)

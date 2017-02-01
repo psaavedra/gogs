@@ -15,7 +15,6 @@ import (
 	"path"
 	"strings"
 
-	"github.com/codegangsta/cli"
 	"github.com/go-macaron/binding"
 	"github.com/go-macaron/cache"
 	"github.com/go-macaron/captcha"
@@ -26,6 +25,7 @@ import (
 	"github.com/go-macaron/toolbox"
 	"github.com/go-xorm/xorm"
 	"github.com/mcuadros/go-version"
+	"github.com/urfave/cli"
 	"gopkg.in/ini.v1"
 	"gopkg.in/macaron.v1"
 
@@ -37,6 +37,7 @@ import (
 	"github.com/gogits/gogs/modules/bindata"
 	"github.com/gogits/gogs/modules/context"
 	"github.com/gogits/gogs/modules/log"
+	"github.com/gogits/gogs/modules/mailer"
 	"github.com/gogits/gogs/modules/setting"
 	"github.com/gogits/gogs/modules/template"
 	"github.com/gogits/gogs/routers"
@@ -73,13 +74,18 @@ func checkVersion() {
 	if err != nil {
 		log.Fatal(4, "Fail to read 'templates/.VERSION': %v", err)
 	}
-	if string(data) != setting.AppVer {
-		log.Fatal(4, "Binary and template file version does not match, did you forget to recompile?")
+	tplVer := string(data)
+	if tplVer != setting.AppVer {
+		if version.Compare(tplVer, setting.AppVer, ">") {
+			log.Fatal(4, "Binary version is lower than template file version, did you forget to recompile Gogs?")
+		} else {
+			log.Fatal(4, "Binary version is higher than template file version, did you forget to update template files?")
+		}
 	}
 
 	// Check dependency version.
 	checkers := []VerChecker{
-		{"github.com/go-xorm/xorm", func() string { return xorm.Version }, "0.5.5"},
+		{"github.com/go-xorm/xorm", func() string { return xorm.Version }, "0.6.0"},
 		{"github.com/go-macaron/binding", binding.Version, "0.3.2"},
 		{"github.com/go-macaron/cache", cache.Version, "0.1.2"},
 		{"github.com/go-macaron/csrf", csrf.Version, "0.1.0"},
@@ -88,13 +94,13 @@ func checkVersion() {
 		{"github.com/go-macaron/toolbox", toolbox.Version, "0.1.0"},
 		{"gopkg.in/ini.v1", ini.Version, "1.8.4"},
 		{"gopkg.in/macaron.v1", macaron.Version, "1.1.7"},
-		{"github.com/gogits/git-module", git.Version, "0.3.7"},
+		{"github.com/gogits/git-module", git.Version, "0.4.5"},
 		{"github.com/gogits/go-gogs-client", gogs.Version, "0.12.1"},
 	}
 	for _, c := range checkers {
 		if !version.Compare(c.Version(), c.Expected, ">=") {
 			log.Fatal(4, `Dependency outdated!
-Package '%s' current version (%s) is below requirement (%s), 
+Package '%s' current version (%s) is below requirement (%s),
 please use following command to update this package and recompile Gogs:
 go get -u %[1]s`, c.ImportPath, c.Version(), c.Expected)
 		}
@@ -111,7 +117,7 @@ func newMacaron() *macaron.Macaron {
 	if setting.EnableGzip {
 		m.Use(gzip.Gziper())
 	}
-	if setting.Protocol == setting.FCGI {
+	if setting.Protocol == setting.SCHEME_FCGI {
 		m.SetURLPrefix(setting.AppSubUrl)
 	}
 	m.Use(macaron.Static(
@@ -135,7 +141,7 @@ func newMacaron() *macaron.Macaron {
 		Funcs:             funcMap,
 		IndentJSON:        macaron.Env != macaron.PROD,
 	}))
-	models.InitMailRender(path.Join(setting.StaticRootPath, "templates/mail"),
+	mailer.InitMailRender(path.Join(setting.StaticRootPath, "templates/mail"),
 		path.Join(setting.CustomPath, "templates/mail"), funcMap)
 
 	localeNames, err := bindata.AssetDir("conf/locale")
@@ -209,6 +215,7 @@ func runWeb(ctx *cli.Context) error {
 		})
 		m.Get("/repos", routers.ExploreRepos)
 		m.Get("/users", routers.ExploreUsers)
+		m.Get("/organizations", routers.ExploreOrganizations)
 	}, ignSignIn)
 	m.Combo("/install", routers.InstallInit).Get(routers.Install).
 		Post(bindIgnErr(auth.InstallForm{}), routers.InstallPost)
@@ -241,6 +248,12 @@ func runWeb(ctx *cli.Context) error {
 		m.Combo("/applications").Get(user.SettingsApplications).
 			Post(bindIgnErr(auth.NewAccessTokenForm{}), user.SettingsApplicationsPost)
 		m.Post("/applications/delete", user.SettingsDeleteApplication)
+
+		m.Group("/organizations", func() {
+			m.Get("", user.SettingsOrganizations)
+			m.Post("/leave", user.SettingsLeaveOrganization)
+		})
+
 		m.Route("/delete", "GET,POST", user.SettingsDelete)
 	}, reqSignIn, func(ctx *context.Context) {
 		ctx.Data["PageIsUserSettings"] = true
@@ -477,7 +490,8 @@ func runWeb(ctx *cli.Context) error {
 			m.Post("/new", bindIgnErr(auth.CreateLabelForm{}), repo.NewLabel)
 			m.Post("/edit", bindIgnErr(auth.CreateLabelForm{}), repo.UpdateLabel)
 			m.Post("/delete", repo.DeleteLabel)
-		}, repo.MustEnableIssues, reqRepoWriter, context.RepoRef())
+			m.Post("/initialize", bindIgnErr(auth.InitializeLabelsForm{}), repo.InitializeLabels)
+		}, reqRepoWriter, context.RepoRef())
 		m.Group("/milestones", func() {
 			m.Combo("/new").Get(repo.NewMilestone).
 				Post(bindIgnErr(auth.CreateMilestoneForm{}), repo.NewMilestonePost)
@@ -485,15 +499,31 @@ func runWeb(ctx *cli.Context) error {
 			m.Post("/:id/edit", bindIgnErr(auth.CreateMilestoneForm{}), repo.EditMilestonePost)
 			m.Get("/:id/:action", repo.ChangeMilestonStatus)
 			m.Post("/delete", repo.DeleteMilestone)
-		}, repo.MustEnableIssues, reqRepoWriter, context.RepoRef())
+		}, reqRepoWriter, context.RepoRef())
 
 		m.Group("/releases", func() {
 			m.Get("/new", repo.NewRelease)
 			m.Post("/new", bindIgnErr(auth.NewReleaseForm{}), repo.NewReleasePost)
-			m.Get("/edit/*", repo.EditRelease)
-			m.Post("/edit/*", bindIgnErr(auth.EditReleaseForm{}), repo.EditReleasePost)
 			m.Post("/delete", repo.DeleteRelease)
 		}, reqRepoWriter, context.RepoRef())
+
+		m.Group("/releases", func() {
+			m.Get("/edit/*", repo.EditRelease)
+			m.Post("/edit/*", bindIgnErr(auth.EditReleaseForm{}), repo.EditReleasePost)
+		}, reqRepoWriter, func(ctx *context.Context) {
+			var err error
+			ctx.Repo.Commit, err = ctx.Repo.GitRepo.GetBranchCommit(ctx.Repo.Repository.DefaultBranch)
+			if err != nil {
+				ctx.Handle(500, "GetBranchCommit", err)
+				return
+			}
+			ctx.Repo.CommitsCount, err = ctx.Repo.Commit.CommitsCount()
+			if err != nil {
+				ctx.Handle(500, "CommitsCount", err)
+				return
+			}
+			ctx.Data["CommitsCount"] = ctx.Repo.CommitsCount
+		})
 
 		m.Combo("/compare/*", repo.MustAllowPulls).Get(repo.CompareAndPullRequest).
 			Post(bindIgnErr(auth.CreateIssueForm{}), repo.CompareAndPullRequestPost)
@@ -504,13 +534,22 @@ func runWeb(ctx *cli.Context) error {
 			m.Combo("/_new/*").Get(repo.NewFile).
 				Post(bindIgnErr(auth.EditRepoFileForm{}), repo.NewFilePost)
 			m.Post("/_preview/*", bindIgnErr(auth.EditPreviewDiffForm{}), repo.DiffPreviewPost)
-			m.Combo("/_upload/*").Get(repo.UploadFile).
-				Post(bindIgnErr(auth.UploadRepoFileForm{}), repo.UploadFilePost)
-			m.Post("/_delete/*", bindIgnErr(auth.DeleteRepoFileForm{}), repo.DeleteFilePost)
-			// m.Post("/upload-file", repo.UploadFileToServer)
-			// m.Post("/upload-remove", bindIgnErr(auth.RemoveUploadFileForm{}), repo.RemoveUploadFileFromServer)
+			m.Combo("/_delete/*").Get(repo.DeleteFile).
+				Post(bindIgnErr(auth.DeleteRepoFileForm{}), repo.DeleteFilePost)
+
+			m.Group("", func() {
+				m.Combo("/_upload/*").Get(repo.UploadFile).
+					Post(bindIgnErr(auth.UploadRepoFileForm{}), repo.UploadFilePost)
+				m.Post("/upload-file", repo.UploadFileToServer)
+				m.Post("/upload-remove", bindIgnErr(auth.RemoveUploadFileForm{}), repo.RemoveUploadFileFromServer)
+			}, func(ctx *context.Context) {
+				if !setting.Repository.Upload.Enabled {
+					ctx.Handle(404, "", nil)
+					return
+				}
+			})
 		}, reqRepoWriter, context.RepoRef(), func(ctx *context.Context) {
-			if ctx.Repo.IsViewCommit {
+			if !ctx.Repo.Repository.CanEnableEditor() || ctx.Repo.IsViewCommit {
 				ctx.Handle(404, "", nil)
 				return
 			}
@@ -527,6 +566,7 @@ func runWeb(ctx *cli.Context) error {
 		}, context.RepoRef())
 
 		// m.Get("/branches", repo.Branches)
+		m.Post("/branches/:name/delete", reqSignIn, reqRepoWriter, repo.DeleteBranchPost)
 
 		m.Group("/wiki", func() {
 			m.Get("/?:page", repo.Wiki)
@@ -553,12 +593,12 @@ func runWeb(ctx *cli.Context) error {
 			m.Get("/src/*", repo.Home)
 			m.Get("/raw/*", repo.SingleDownload)
 			m.Get("/commits/*", repo.RefCommits)
-			m.Get("/commit/:sha([a-z0-9]{7,40})$", repo.Diff)
+			m.Get("/commit/:sha([a-f0-9]{7,40})$", repo.Diff)
 			m.Get("/forks", repo.Forks)
 		}, context.RepoRef())
-		m.Get("/commit/:sha([a-z0-9]{7,40})\\.:ext(patch|diff)", repo.RawDiff)
+		m.Get("/commit/:sha([a-f0-9]{7,40})\\.:ext(patch|diff)", repo.RawDiff)
 
-		m.Get("/compare/:before([a-z0-9]{7,40})\\.\\.\\.:after([a-z0-9]{7,40})", repo.CompareDiff)
+		m.Get("/compare/:before([a-z0-9]{40})\\.\\.\\.:after([a-z0-9]{40})", repo.CompareDiff)
 	}, ignSignIn, context.RepoAssignment(), repo.MustBeNotBare)
 	m.Group("/:username/:reponame", func() {
 		m.Get("/stars", repo.Stars)
@@ -601,7 +641,7 @@ func runWeb(ctx *cli.Context) error {
 	}
 
 	var listenAddr string
-	if setting.Protocol == setting.UNIX_SOCKET {
+	if setting.Protocol == setting.SCHEME_UNIX_SOCKET {
 		listenAddr = fmt.Sprintf("%s", setting.HTTPAddr)
 	} else {
 		listenAddr = fmt.Sprintf("%s:%s", setting.HTTPAddr, setting.HTTPPort)
@@ -610,14 +650,14 @@ func runWeb(ctx *cli.Context) error {
 
 	var err error
 	switch setting.Protocol {
-	case setting.HTTP:
+	case setting.SCHEME_HTTP:
 		err = http.ListenAndServe(listenAddr, m)
-	case setting.HTTPS:
+	case setting.SCHEME_HTTPS:
 		server := &http.Server{Addr: listenAddr, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS10}, Handler: m}
 		err = server.ListenAndServeTLS(setting.CertFile, setting.KeyFile)
-	case setting.FCGI:
+	case setting.SCHEME_FCGI:
 		err = fcgi.Serve(nil, m)
-	case setting.UNIX_SOCKET:
+	case setting.SCHEME_UNIX_SOCKET:
 		os.Remove(listenAddr)
 
 		var listener *net.UnixListener

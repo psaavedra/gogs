@@ -10,10 +10,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/Unknwon/com"
 	"github.com/go-xorm/xorm"
 	gouuid "github.com/satori/go.uuid"
 
@@ -22,7 +20,10 @@ import (
 	"github.com/gogits/gogs/modules/httplib"
 	"github.com/gogits/gogs/modules/log"
 	"github.com/gogits/gogs/modules/setting"
+	"github.com/gogits/gogs/modules/sync"
 )
+
+var HookQueue = sync.NewUniqueQueue(setting.Webhook.QueueLength)
 
 type HookContentType int
 
@@ -165,12 +166,15 @@ func (w *Webhook) HasPullRequestEvent() bool {
 }
 
 func (w *Webhook) EventsArray() []string {
-	events := make([]string, 0, 2)
+	events := make([]string, 0, 3)
 	if w.HasCreateEvent() {
 		events = append(events, "create")
 	}
 	if w.HasPushEvent() {
 		events = append(events, "push")
+	}
+	if w.HasPullRequestEvent() {
+		events = append(events, "pull_request")
 	}
 	return events
 }
@@ -210,15 +214,18 @@ func GetWebhookByOrgID(orgID, id int64) (*Webhook, error) {
 }
 
 // GetActiveWebhooksByRepoID returns all active webhooks of repository.
-func GetActiveWebhooksByRepoID(repoID int64) (ws []*Webhook, err error) {
-	err = x.Where("repo_id=?", repoID).And("is_active=?", true).Find(&ws)
-	return ws, err
+func GetActiveWebhooksByRepoID(repoID int64) ([]*Webhook, error) {
+	webhooks := make([]*Webhook, 0, 5)
+	return webhooks, x.Find(&webhooks, &Webhook{
+		RepoID:   repoID,
+		IsActive: true,
+	})
 }
 
-// GetWebhooksByRepoID returns all webhooks of repository.
-func GetWebhooksByRepoID(repoID int64) (ws []*Webhook, err error) {
-	err = x.Find(&ws, &Webhook{RepoID: repoID})
-	return ws, err
+// GetWebhooksByRepoID returns all webhooks of a repository.
+func GetWebhooksByRepoID(repoID int64) ([]*Webhook, error) {
+	webhooks := make([]*Webhook, 0, 5)
+	return webhooks, x.Find(&webhooks, &Webhook{RepoID: repoID})
 }
 
 // UpdateWebhook updates information of webhook.
@@ -245,16 +252,16 @@ func deleteWebhook(bean *Webhook) (err error) {
 	return sess.Commit()
 }
 
-// DeleteWebhookByRepoID deletes webhook of repository by given ID.
-func DeleteWebhookByRepoID(repoID, id int64) error {
+// DeleteWebhookOfRepoByID deletes webhook of repository by given ID.
+func DeleteWebhookOfRepoByID(repoID, id int64) error {
 	return deleteWebhook(&Webhook{
 		ID:     id,
 		RepoID: repoID,
 	})
 }
 
-// DeleteWebhookByOrgID deletes webhook of organization by given ID.
-func DeleteWebhookByOrgID(orgID, id int64) error {
+// DeleteWebhookOfOrgByID deletes webhook of organization by given ID.
+func DeleteWebhookOfOrgByID(orgID, id int64) error {
 	return deleteWebhook(&Webhook{
 		ID:    id,
 		OrgID: orgID,
@@ -494,64 +501,6 @@ func PrepareWebhooks(repo *Repository, event HookEventType, p api.Payloader) err
 	return nil
 }
 
-// UniqueQueue represents a queue that guarantees only one instance of same ID is in the line.
-type UniqueQueue struct {
-	lock sync.Mutex
-	ids  map[string]bool
-
-	queue chan string
-}
-
-func (q *UniqueQueue) Queue() <-chan string {
-	return q.queue
-}
-
-func NewUniqueQueue(queueLength int) *UniqueQueue {
-	if queueLength <= 0 {
-		queueLength = 100
-	}
-
-	return &UniqueQueue{
-		ids:   make(map[string]bool),
-		queue: make(chan string, queueLength),
-	}
-}
-
-func (q *UniqueQueue) Remove(id interface{}) {
-	q.lock.Lock()
-	defer q.lock.Unlock()
-	delete(q.ids, com.ToStr(id))
-}
-
-func (q *UniqueQueue) AddFunc(id interface{}, fn func()) {
-	newid := com.ToStr(id)
-
-	if q.Exist(id) {
-		return
-	}
-
-	q.lock.Lock()
-	q.ids[newid] = true
-	if fn != nil {
-		fn()
-	}
-	q.lock.Unlock()
-	q.queue <- newid
-}
-
-func (q *UniqueQueue) Add(id interface{}) {
-	q.AddFunc(id, nil)
-}
-
-func (q *UniqueQueue) Exist(id interface{}) bool {
-	q.lock.Lock()
-	defer q.lock.Unlock()
-
-	return q.ids[com.ToStr(id)]
-}
-
-var HookQueue = NewUniqueQueue(setting.Webhook.QueueLength)
-
 func (t *HookTask) deliver() {
 	t.IsDelivered = true
 
@@ -648,12 +597,12 @@ func DeliverHooks() {
 
 	// Start listening on new hook requests.
 	for repoID := range HookQueue.Queue() {
-		log.Trace("DeliverHooks [%v]: processing delivery hooks", repoID)
+		log.Trace("DeliverHooks [repo_id: %v]", repoID)
 		HookQueue.Remove(repoID)
 
 		tasks = make([]*HookTask, 0, 5)
 		if err := x.Where("repo_id=? AND is_delivered=?", repoID, false).Find(&tasks); err != nil {
-			log.Error(4, "Get repository [%d] hook tasks: %v", repoID, err)
+			log.Error(4, "Get repository [%s] hook tasks: %v", repoID, err)
 			continue
 		}
 		for _, t := range tasks {

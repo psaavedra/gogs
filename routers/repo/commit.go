@@ -20,14 +20,14 @@ import (
 
 const (
 	COMMITS base.TplName = "repo/commits"
-	DIFF    base.TplName = "repo/diff"
+	DIFF    base.TplName = "repo/diff/page"
 )
 
 func RefCommits(ctx *context.Context) {
 	switch {
-	case len(ctx.Repo.TreeName) == 0:
+	case len(ctx.Repo.TreePath) == 0:
 		Commits(ctx)
-	case ctx.Repo.TreeName == "search":
+	case ctx.Repo.TreePath == "search":
 		SearchCommits(ctx)
 	default:
 		FileHistory(ctx)
@@ -104,7 +104,7 @@ func SearchCommits(ctx *context.Context) {
 func FileHistory(ctx *context.Context) {
 	ctx.Data["IsRepoToolbarCommits"] = true
 
-	fileName := ctx.Repo.TreeName
+	fileName := ctx.Repo.TreePath
 	if len(fileName) == 0 {
 		Commits(ctx)
 		return

@@ -25,9 +25,9 @@ func ListIssues(ctx *context.APIContext) {
 		return
 	}
 
+	// FIXME: use IssueList to improve performance.
 	apiIssues := make([]*api.Issue, len(issues))
 	for i := range issues {
-		// FIXME: use IssueList to improve performance.
 		if err = issues[i].LoadAttributes(); err != nil {
 			ctx.Error(500, "LoadAttributes", err)
 			return
@@ -49,7 +49,6 @@ func GetIssue(ctx *context.APIContext) {
 		}
 		return
 	}
-
 	ctx.JSON(200, issue.APIFormat())
 }
 
@@ -133,7 +132,7 @@ func EditIssue(ctx *context.APIContext, form api.EditIssueOption) {
 			assignee, err := models.GetUserByName(*form.Assignee)
 			if err != nil {
 				if models.IsErrUserNotExist(err) {
-					ctx.Error(422, "", fmt.Sprintf("Assignee does not exist: [name: %s]", *form.Assignee))
+					ctx.Error(422, "", fmt.Sprintf("assignee does not exist: [name: %s]", *form.Assignee))
 				} else {
 					ctx.Error(500, "GetUserByName", err)
 				}

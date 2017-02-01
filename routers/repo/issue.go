@@ -121,16 +121,16 @@ func Issues(ctx *context.Context) {
 		assigneeID = ctx.QueryInt64("assignee")
 		posterID   int64
 	)
-	filterMode := models.FM_ALL
+	filterMode := models.FILTER_MODE_YOUR_REPOS
 	switch viewType {
 	case "assigned":
-		filterMode = models.FM_ASSIGN
+		filterMode = models.FILTER_MODE_ASSIGN
 		assigneeID = ctx.User.ID
 	case "created_by":
-		filterMode = models.FM_CREATE
+		filterMode = models.FILTER_MODE_CREATE
 		posterID = ctx.User.ID
 	case "mentioned":
-		filterMode = models.FM_MENTION
+		filterMode = models.FILTER_MODE_MENTION
 	}
 
 	var uid int64 = -1
@@ -166,7 +166,6 @@ func Issues(ctx *context.Context) {
 	pager := paginater.New(total, setting.UI.IssuePagingNum, page, 5)
 	ctx.Data["Page"] = pager
 
-	// Get issues.
 	issues, err := models.Issues(&models.IssuesOptions{
 		UserID:      uid,
 		AssigneeID:  assigneeID,
@@ -175,7 +174,7 @@ func Issues(ctx *context.Context) {
 		MilestoneID: milestoneID,
 		Page:        pager.Current(),
 		IsClosed:    isShowClosed,
-		IsMention:   filterMode == models.FM_MENTION,
+		IsMention:   filterMode == models.FILTER_MODE_MENTION,
 		IsPull:      isPullList,
 		Labels:      selectLabels,
 		SortType:    sortType,
@@ -210,7 +209,7 @@ func Issues(ctx *context.Context) {
 	ctx.Data["Issues"] = issues
 
 	// Get milestones.
-	ctx.Data["Milestones"], err = models.GetAllRepoMilestones(repo.ID)
+	ctx.Data["Milestones"], err = models.GetMilestonesByRepoID(repo.ID)
 	if err != nil {
 		ctx.Handle(500, "GetAllRepoMilestones", err)
 		return
@@ -331,6 +330,8 @@ func setTemplateIfExists(ctx *context.Context, ctxDataKey string, possibleFiles 
 func NewIssue(ctx *context.Context) {
 	ctx.Data["Title"] = ctx.Tr("repo.issues.new")
 	ctx.Data["PageIsIssueList"] = true
+	ctx.Data["RequireHighlightJS"] = true
+	ctx.Data["RequireSimpleMDE"] = true
 	setTemplateIfExists(ctx, ISSUE_TEMPLATE_KEY, IssueTemplateCandidates)
 	renderAttachmentSettings(ctx)
 
@@ -338,10 +339,6 @@ func NewIssue(ctx *context.Context) {
 	if ctx.Written() {
 		return
 	}
-
-	ctx.Data["RequireHighlightJS"] = true
-	ctx.Data["RequireSimpleMDE"] = true
-	ctx.Data["RepoName"] = ctx.Repo.Repository.Name
 
 	ctx.HTML(200, ISSUE_NEW)
 }
@@ -403,7 +400,6 @@ func ValidateRepoMetas(ctx *context.Context, form auth.CreateIssueForm) ([]int64
 func NewIssuePost(ctx *context.Context, form auth.CreateIssueForm) {
 	ctx.Data["Title"] = ctx.Tr("repo.issues.new")
 	ctx.Data["PageIsIssueList"] = true
-	ctx.Data["RepoName"] = ctx.Repo.Repository.Name
 	ctx.Data["RequireHighlightJS"] = true
 	ctx.Data["RequireSimpleMDE"] = true
 	renderAttachmentSettings(ctx)
@@ -451,7 +447,6 @@ func UploadIssueAttachment(ctx *context.Context) {
 		return
 	}
 
-	allowedTypes := strings.Split(setting.AttachmentAllowedTypes, ",")
 	file, header, err := ctx.Req.FormFile("file")
 	if err != nil {
 		ctx.Error(500, fmt.Sprintf("FormFile: %v", err))
@@ -466,6 +461,7 @@ func UploadIssueAttachment(ctx *context.Context) {
 	}
 	fileType := http.DetectContentType(buf)
 
+	allowedTypes := strings.Split(setting.AttachmentAllowedTypes, ",")
 	allowed := false
 	for _, t := range allowedTypes {
 		t := strings.Trim(t, " ")
@@ -493,6 +489,7 @@ func UploadIssueAttachment(ctx *context.Context) {
 }
 
 func ViewIssue(ctx *context.Context) {
+	ctx.Data["RequireHighlightJS"] = true
 	ctx.Data["RequireDropzone"] = true
 	renderAttachmentSettings(ctx)
 
@@ -632,16 +629,20 @@ func ViewIssue(ctx *context.Context) {
 		}
 	}
 
+	if issue.IsPull && issue.PullRequest.HasMerged {
+		pull := issue.PullRequest
+		ctx.Data["IsPullBranchDeletable"] = pull.BaseRepoID == pull.HeadRepoID &&
+			ctx.Repo.IsWriter() && ctx.Repo.GitRepo.IsBranchExist(pull.HeadBranch)
+
+		deleteBranchUrl := ctx.Repo.RepoLink + "/branches/" + pull.HeadBranch + "/delete"
+		ctx.Data["DeleteBranchLink"] = fmt.Sprintf("%s?commit=%s&redirect_to=%s", deleteBranchUrl, pull.MergedCommitID, ctx.Data["Link"])
+	}
+
 	ctx.Data["Participants"] = participants
 	ctx.Data["NumParticipants"] = len(participants)
 	ctx.Data["Issue"] = issue
 	ctx.Data["IsIssueOwner"] = ctx.Repo.IsWriter() || (ctx.IsSigned && issue.IsPoster(ctx.User.ID))
 	ctx.Data["SignInLink"] = setting.AppSubUrl + "/user/login?redirect_to=" + ctx.Data["Link"].(string)
-
-	ctx.Data["RequireHighlightJS"] = true
-	ctx.Data["RequireSimpleMDE"] = true
-	ctx.Data["RepoName"] = ctx.Repo.Repository.Name
-
 	ctx.HTML(200, ISSUE_VIEW)
 }
 
@@ -720,7 +721,7 @@ func UpdateIssueLabel(ctx *context.Context) {
 		}
 	} else {
 		isAttach := ctx.Query("action") == "attach"
-		label, err := models.GetLabelByID(ctx.QueryInt64("id"))
+		label, err := models.GetLabelOfRepoByID(ctx.Repo.Repository.ID, ctx.QueryInt64("id"))
 		if err != nil {
 			if models.IsErrLabelNotExist(err) {
 				ctx.Error(404, "GetLabelByID")
@@ -802,7 +803,7 @@ func UpdateIssueAssignee(ctx *context.Context) {
 func NewComment(ctx *context.Context, form auth.CreateCommentForm) {
 	issue, err := models.GetIssueByIndex(ctx.Repo.Repository.ID, ctx.ParamsInt64(":index"))
 	if err != nil {
-		ctx.HandleError("GetIssueByIndex", models.IsErrIssueNotExist, err, 404)
+		ctx.NotFoundOrServerError("GetIssueByIndex", models.IsErrIssueNotExist, err)
 		return
 	}
 
@@ -888,7 +889,7 @@ func NewComment(ctx *context.Context, form auth.CreateCommentForm) {
 func UpdateCommentContent(ctx *context.Context) {
 	comment, err := models.GetCommentByID(ctx.ParamsInt64(":id"))
 	if err != nil {
-		ctx.HandleError("GetCommentByID", models.IsErrCommentNotExist, err, 404)
+		ctx.NotFoundOrServerError("GetCommentByID", models.IsErrCommentNotExist, err)
 		return
 	}
 
@@ -920,7 +921,7 @@ func UpdateCommentContent(ctx *context.Context) {
 func DeleteComment(ctx *context.Context) {
 	comment, err := models.GetCommentByID(ctx.ParamsInt64(":id"))
 	if err != nil {
-		ctx.HandleError("GetCommentByID", models.IsErrCommentNotExist, err, 404)
+		ctx.NotFoundOrServerError("GetCommentByID", models.IsErrCommentNotExist, err)
 		return
 	}
 
@@ -945,7 +946,35 @@ func Labels(ctx *context.Context) {
 	ctx.Data["PageIsIssueList"] = true
 	ctx.Data["PageIsLabels"] = true
 	ctx.Data["RequireMinicolors"] = true
+	ctx.Data["LabelTemplates"] = models.LabelTemplates
 	ctx.HTML(200, LABELS)
+}
+
+func InitializeLabels(ctx *context.Context, form auth.InitializeLabelsForm) {
+	if ctx.HasError() {
+		ctx.Redirect(ctx.Repo.RepoLink + "/labels")
+		return
+	}
+	list, err := models.GetLabelTemplateFile(form.TemplateName)
+	if err != nil {
+		ctx.Flash.Error(ctx.Tr("repo.issues.label_templates.fail_to_load_file", form.TemplateName, err))
+		ctx.Redirect(ctx.Repo.RepoLink + "/labels")
+		return
+	}
+
+	labels := make([]*models.Label, len(list))
+	for i := 0; i < len(list); i++ {
+		labels[i] = &models.Label{
+			RepoID: ctx.Repo.Repository.ID,
+			Name:   list[i][0],
+			Color:  list[i][1],
+		}
+	}
+	if err := models.NewLabels(labels...); err != nil {
+		ctx.Handle(500, "NewLabels", err)
+		return
+	}
+	ctx.Redirect(ctx.Repo.RepoLink + "/labels")
 }
 
 func NewLabel(ctx *context.Context, form auth.CreateLabelForm) {
@@ -963,7 +992,7 @@ func NewLabel(ctx *context.Context, form auth.CreateLabelForm) {
 		Name:   form.Title,
 		Color:  form.Color,
 	}
-	if err := models.NewLabel(l); err != nil {
+	if err := models.NewLabels(l); err != nil {
 		ctx.Handle(500, "NewLabel", err)
 		return
 	}
@@ -1099,12 +1128,12 @@ func EditMilestone(ctx *context.Context) {
 	ctx.Data["RequireDatetimepicker"] = true
 	ctx.Data["DateLang"] = setting.DateLang(ctx.Locale.Language())
 
-	m, err := models.GetMilestoneByID(ctx.ParamsInt64(":id"))
+	m, err := models.GetMilestoneByRepoID(ctx.Repo.Repository.ID, ctx.ParamsInt64(":id"))
 	if err != nil {
 		if models.IsErrMilestoneNotExist(err) {
-			ctx.Handle(404, "GetMilestoneByID", nil)
+			ctx.Handle(404, "", nil)
 		} else {
-			ctx.Handle(500, "GetMilestoneByID", err)
+			ctx.Handle(500, "GetMilestoneByRepoID", err)
 		}
 		return
 	}
@@ -1138,12 +1167,12 @@ func EditMilestonePost(ctx *context.Context, form auth.CreateMilestoneForm) {
 		return
 	}
 
-	m, err := models.GetMilestoneByID(ctx.ParamsInt64(":id"))
+	m, err := models.GetMilestoneByRepoID(ctx.Repo.Repository.ID, ctx.ParamsInt64(":id"))
 	if err != nil {
 		if models.IsErrMilestoneNotExist(err) {
-			ctx.Handle(404, "GetMilestoneByID", nil)
+			ctx.Handle(404, "", nil)
 		} else {
-			ctx.Handle(500, "GetMilestoneByID", err)
+			ctx.Handle(500, "GetMilestoneByRepoID", err)
 		}
 		return
 	}
@@ -1160,12 +1189,12 @@ func EditMilestonePost(ctx *context.Context, form auth.CreateMilestoneForm) {
 }
 
 func ChangeMilestonStatus(ctx *context.Context) {
-	m, err := models.GetMilestoneByID(ctx.ParamsInt64(":id"))
+	m, err := models.GetMilestoneByRepoID(ctx.Repo.Repository.ID, ctx.ParamsInt64(":id"))
 	if err != nil {
 		if models.IsErrMilestoneNotExist(err) {
-			ctx.Handle(404, "GetMilestoneByID", err)
+			ctx.Handle(404, "", err)
 		} else {
-			ctx.Handle(500, "GetMilestoneByID", err)
+			ctx.Handle(500, "GetMilestoneByRepoID", err)
 		}
 		return
 	}
@@ -1194,8 +1223,8 @@ func ChangeMilestonStatus(ctx *context.Context) {
 }
 
 func DeleteMilestone(ctx *context.Context) {
-	if err := models.DeleteMilestoneByID(ctx.QueryInt64("id")); err != nil {
-		ctx.Flash.Error("DeleteMilestoneByID: " + err.Error())
+	if err := models.DeleteMilestoneOfRepoByID(ctx.Repo.Repository.ID, ctx.QueryInt64("id")); err != nil {
+		ctx.Flash.Error("DeleteMilestoneByRepoID: " + err.Error())
 	} else {
 		ctx.Flash.Success(ctx.Tr("repo.milestones.deletion_success"))
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/gogits/gogs/modules/base"
 	"github.com/gogits/gogs/modules/context"
 	"github.com/gogits/gogs/modules/log"
+	"github.com/gogits/gogs/modules/mailer"
 	"github.com/gogits/gogs/modules/setting"
 )
 
@@ -104,32 +105,40 @@ func SettingsPost(ctx *context.Context, form auth.RepoSettingForm) {
 			}
 		}
 
-		if repo.IsMirror {
-			if isNameChanged {
-				var err error
-				ctx.Repo.Mirror, err = models.GetMirror(repo.ID)
-				if err != nil {
-					ctx.Handle(500, "RefreshRepositoryMirror", err)
-					return
-				}
-			}
+		ctx.Flash.Success(ctx.Tr("repo.settings.update_settings_success"))
+		ctx.Redirect(repo.Link() + "/settings")
 
-			if form.Interval > 0 {
-				ctx.Repo.Mirror.EnablePrune = form.EnablePrune
-				ctx.Repo.Mirror.Interval = form.Interval
-				ctx.Repo.Mirror.NextUpdate = time.Now().Add(time.Duration(form.Interval) * time.Hour)
-				if err := models.UpdateMirror(ctx.Repo.Mirror); err != nil {
-					ctx.Handle(500, "UpdateMirror", err)
-					return
-				}
-			}
-			if err := ctx.Repo.Mirror.SaveAddress(form.MirrorAddress); err != nil {
-				ctx.Handle(500, "SaveAddress", err)
+	case "mirror":
+		if !repo.IsMirror {
+			ctx.Handle(404, "", nil)
+			return
+		}
+
+		if form.Interval > 0 {
+			ctx.Repo.Mirror.EnablePrune = form.EnablePrune
+			ctx.Repo.Mirror.Interval = form.Interval
+			ctx.Repo.Mirror.NextUpdate = time.Now().Add(time.Duration(form.Interval) * time.Hour)
+			if err := models.UpdateMirror(ctx.Repo.Mirror); err != nil {
+				ctx.Handle(500, "UpdateMirror", err)
 				return
 			}
 		}
+		if err := ctx.Repo.Mirror.SaveAddress(form.MirrorAddress); err != nil {
+			ctx.Handle(500, "SaveAddress", err)
+			return
+		}
 
 		ctx.Flash.Success(ctx.Tr("repo.settings.update_settings_success"))
+		ctx.Redirect(repo.Link() + "/settings")
+
+	case "mirror-sync":
+		if !repo.IsMirror {
+			ctx.Handle(404, "", nil)
+			return
+		}
+
+		go models.MirrorQueue.Add(repo.ID)
+		ctx.Flash.Info(ctx.Tr("repo.settings.mirror_sync_in_progress"))
 		ctx.Redirect(repo.Link() + "/settings")
 
 	case "advanced":
@@ -278,6 +287,9 @@ func SettingsPost(ctx *context.Context, form auth.RepoSettingForm) {
 
 		ctx.Flash.Success(ctx.Tr("repo.settings.wiki_deletion_success"))
 		ctx.Redirect(ctx.Repo.RepoLink + "/settings")
+
+	default:
+		ctx.Handle(404, "", nil)
 	}
 }
 
@@ -333,7 +345,7 @@ func CollaborationPost(ctx *context.Context) {
 	}
 
 	if setting.Service.EnableNotifyMail {
-		models.SendCollaboratorMail(u, ctx.User, ctx.Repo.Repository)
+		mailer.SendCollaboratorMail(models.NewMailerUser(u), models.NewMailerUser(ctx.User), models.NewMailerRepo(ctx.Repo.Repository))
 	}
 
 	ctx.Flash.Success(ctx.Tr("repo.settings.add_collaborator_success"))

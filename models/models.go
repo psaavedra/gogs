@@ -34,7 +34,8 @@ type Engine interface {
 	InsertOne(interface{}) (int64, error)
 	Iterate(interface{}, xorm.IterFunc) error
 	Sql(string, ...interface{}) *xorm.Session
-	Where(string, ...interface{}) *xorm.Session
+	Table(interface{}) *xorm.Session
+	Where(interface{}, ...interface{}) *xorm.Session
 }
 
 func sessionRelease(sess *xorm.Session) {
@@ -60,7 +61,7 @@ var (
 func init() {
 	tables = append(tables,
 		new(User), new(PublicKey), new(AccessToken),
-		new(Repository), new(DeployKey), new(Collaboration), new(Access),
+		new(Repository), new(DeployKey), new(Collaboration), new(Access), new(Upload),
 		new(Watch), new(Star), new(Follow), new(Action),
 		new(Issue), new(PullRequest), new(Comment), new(Attachment), new(IssueUser),
 		new(Label), new(IssueLabel), new(Milestone),
