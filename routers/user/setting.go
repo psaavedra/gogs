@@ -5,32 +5,35 @@
 package user
 
 import (
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"strings"
 
 	"github.com/Unknwon/com"
+	log "gopkg.in/clog.v1"
 
 	"github.com/gogits/gogs/models"
-	"github.com/gogits/gogs/modules/auth"
+	"github.com/gogits/gogs/models/errors"
 	"github.com/gogits/gogs/modules/base"
 	"github.com/gogits/gogs/modules/context"
-	"github.com/gogits/gogs/modules/log"
+	"github.com/gogits/gogs/modules/form"
+	"github.com/gogits/gogs/modules/mailer"
 	"github.com/gogits/gogs/modules/setting"
 )
 
 const (
-	SETTINGS_PROFILE      base.TplName = "user/settings/profile"
-	SETTINGS_AVATAR       base.TplName = "user/settings/avatar"
-	SETTINGS_PASSWORD     base.TplName = "user/settings/password"
-	SETTINGS_EMAILS       base.TplName = "user/settings/email"
-	SETTINGS_SSH_KEYS     base.TplName = "user/settings/sshkeys"
-	SETTINGS_SOCIAL       base.TplName = "user/settings/social"
-	SETTINGS_APPLICATIONS base.TplName = "user/settings/applications"
-	SETTINGS_DELETE       base.TplName = "user/settings/delete"
-	NOTIFICATION          base.TplName = "user/notification"
-	SECURITY              base.TplName = "user/security"
+	SETTINGS_PROFILE       base.TplName = "user/settings/profile"
+	SETTINGS_AVATAR        base.TplName = "user/settings/avatar"
+	SETTINGS_PASSWORD      base.TplName = "user/settings/password"
+	SETTINGS_EMAILS        base.TplName = "user/settings/email"
+	SETTINGS_SSH_KEYS      base.TplName = "user/settings/sshkeys"
+	SETTINGS_SOCIAL        base.TplName = "user/settings/social"
+	SETTINGS_APPLICATIONS  base.TplName = "user/settings/applications"
+	SETTINGS_ORGANIZATIONS base.TplName = "user/settings/organizations"
+	SETTINGS_REPOSITORIES  base.TplName = "user/settings/repositories"
+	SETTINGS_DELETE        base.TplName = "user/settings/delete"
+	NOTIFICATION           base.TplName = "user/notification"
+	SECURITY               base.TplName = "user/security"
 )
 
 func Settings(ctx *context.Context) {
@@ -74,7 +77,7 @@ func handleUsernameChange(ctx *context.Context, newName string) {
 	ctx.User.LowerName = strings.ToLower(newName)
 }
 
-func SettingsPost(ctx *context.Context, form auth.UpdateProfileForm) {
+func SettingsPost(ctx *context.Context, f form.UpdateProfile) {
 	ctx.Data["Title"] = ctx.Tr("settings")
 	ctx.Data["PageIsSettingsProfile"] = true
 
@@ -83,15 +86,15 @@ func SettingsPost(ctx *context.Context, form auth.UpdateProfileForm) {
 		return
 	}
 
-	handleUsernameChange(ctx, form.Name)
+	handleUsernameChange(ctx, f.Name)
 	if ctx.Written() {
 		return
 	}
 
-	ctx.User.FullName = form.FullName
-	ctx.User.Email = form.Email
-	ctx.User.Website = form.Website
-	ctx.User.Location = form.Location
+	ctx.User.FullName = f.FullName
+	ctx.User.Email = f.Email
+	ctx.User.Website = f.Website
+	ctx.User.Location = f.Location
 	if err := models.UpdateUser(ctx.User); err != nil {
 		ctx.Handle(500, "UpdateUser", err)
 		return
@@ -103,15 +106,15 @@ func SettingsPost(ctx *context.Context, form auth.UpdateProfileForm) {
 }
 
 // FIXME: limit size.
-func UpdateAvatarSetting(ctx *context.Context, form auth.AvatarForm, ctxUser *models.User) error {
-	ctxUser.UseCustomAvatar = form.Source == auth.AVATAR_LOCAL
-	if len(form.Gravatar) > 0 {
-		ctxUser.Avatar = base.EncodeMD5(form.Gravatar)
-		ctxUser.AvatarEmail = form.Gravatar
+func UpdateAvatarSetting(ctx *context.Context, f form.Avatar, ctxUser *models.User) error {
+	ctxUser.UseCustomAvatar = f.Source == form.AVATAR_LOCAL
+	if len(f.Gravatar) > 0 {
+		ctxUser.Avatar = base.EncodeMD5(f.Gravatar)
+		ctxUser.AvatarEmail = f.Gravatar
 	}
 
-	if form.Avatar != nil {
-		fr, err := form.Avatar.Open()
+	if f.Avatar != nil {
+		fr, err := f.Avatar.Open()
 		if err != nil {
 			return fmt.Errorf("Avatar.Open: %v", err)
 		}
@@ -121,7 +124,7 @@ func UpdateAvatarSetting(ctx *context.Context, form auth.AvatarForm, ctxUser *mo
 		if err != nil {
 			return fmt.Errorf("ioutil.ReadAll: %v", err)
 		}
-		if _, ok := base.IsImageFile(data); !ok {
+		if !base.IsImageFile(data) {
 			return errors.New(ctx.Tr("settings.uploaded_avatar_not_a_image"))
 		}
 		if err = ctxUser.UploadAvatar(data); err != nil {
@@ -150,8 +153,8 @@ func SettingsAvatar(ctx *context.Context) {
 	ctx.HTML(200, SETTINGS_AVATAR)
 }
 
-func SettingsAvatarPost(ctx *context.Context, form auth.AvatarForm) {
-	if err := UpdateAvatarSetting(ctx, form, ctx.User); err != nil {
+func SettingsAvatarPost(ctx *context.Context, f form.Avatar) {
+	if err := UpdateAvatarSetting(ctx, f, ctx.User); err != nil {
 		ctx.Flash.Error(err.Error())
 	} else {
 		ctx.Flash.Success(ctx.Tr("settings.update_avatar_success"))
@@ -174,7 +177,7 @@ func SettingsPassword(ctx *context.Context) {
 	ctx.HTML(200, SETTINGS_PASSWORD)
 }
 
-func SettingsPasswordPost(ctx *context.Context, form auth.ChangePasswordForm) {
+func SettingsPasswordPost(ctx *context.Context, f form.ChangePassword) {
 	ctx.Data["Title"] = ctx.Tr("settings")
 	ctx.Data["PageIsSettingsPassword"] = true
 
@@ -183,13 +186,17 @@ func SettingsPasswordPost(ctx *context.Context, form auth.ChangePasswordForm) {
 		return
 	}
 
-	if !ctx.User.ValidatePassword(form.OldPassword) {
+	if !ctx.User.ValidatePassword(f.OldPassword) {
 		ctx.Flash.Error(ctx.Tr("settings.password_incorrect"))
-	} else if form.Password != form.Retype {
+	} else if f.Password != f.Retype {
 		ctx.Flash.Error(ctx.Tr("form.password_not_match"))
 	} else {
-		ctx.User.Passwd = form.Password
-		ctx.User.Salt = models.GetUserSalt()
+		ctx.User.Passwd = f.Password
+		var err error
+		if ctx.User.Salt, err = models.GetUserSalt(); err != nil {
+			ctx.Handle(500, "UpdateUser", err)
+			return
+		}
 		ctx.User.EncodePasswd()
 		if err := models.UpdateUser(ctx.User); err != nil {
 			ctx.Handle(500, "UpdateUser", err)
@@ -216,7 +223,7 @@ func SettingsEmails(ctx *context.Context) {
 	ctx.HTML(200, SETTINGS_EMAILS)
 }
 
-func SettingsEmailPost(ctx *context.Context, form auth.AddEmailForm) {
+func SettingsEmailPost(ctx *context.Context, f form.AddEmail) {
 	ctx.Data["Title"] = ctx.Tr("settings")
 	ctx.Data["PageIsSettingsEmails"] = true
 
@@ -247,12 +254,12 @@ func SettingsEmailPost(ctx *context.Context, form auth.AddEmailForm) {
 
 	email := &models.EmailAddress{
 		UID:         ctx.User.ID,
-		Email:       form.Email,
+		Email:       f.Email,
 		IsActivated: !setting.Service.RegisterEmailConfirm,
 	}
 	if err := models.AddEmailAddress(email); err != nil {
 		if models.IsErrEmailAlreadyUsed(err) {
-			ctx.RenderWithErr(ctx.Tr("form.email_been_used"), SETTINGS_EMAILS, &form)
+			ctx.RenderWithErr(ctx.Tr("form.email_been_used"), SETTINGS_EMAILS, &f)
 			return
 		}
 		ctx.Handle(500, "AddEmailAddress", err)
@@ -261,7 +268,7 @@ func SettingsEmailPost(ctx *context.Context, form auth.AddEmailForm) {
 
 	// Send confirmation email
 	if setting.Service.RegisterEmailConfirm {
-		models.SendActivateEmailMail(ctx.Context, ctx.User, email)
+		mailer.SendActivateEmailMail(ctx.Context, models.NewMailerUser(ctx.User), email.Email)
 
 		if err := ctx.Cache.Put("MailResendLimit_"+ctx.User.LowerName, ctx.User.LowerName, 180); err != nil {
 			log.Error(4, "Set cache(MailResendLimit) fail: %v", err)
@@ -276,7 +283,10 @@ func SettingsEmailPost(ctx *context.Context, form auth.AddEmailForm) {
 }
 
 func DeleteEmail(ctx *context.Context) {
-	if err := models.DeleteEmailAddress(&models.EmailAddress{ID: ctx.QueryInt64("id")}); err != nil {
+	if err := models.DeleteEmailAddress(&models.EmailAddress{
+		ID:  ctx.QueryInt64("id"),
+		UID: ctx.User.ID,
+	}); err != nil {
 		ctx.Handle(500, "DeleteEmail", err)
 		return
 	}
@@ -302,7 +312,7 @@ func SettingsSSHKeys(ctx *context.Context) {
 	ctx.HTML(200, SETTINGS_SSH_KEYS)
 }
 
-func SettingsSSHKeysPost(ctx *context.Context, form auth.AddSSHKeyForm) {
+func SettingsSSHKeysPost(ctx *context.Context, f form.AddSSHKey) {
 	ctx.Data["Title"] = ctx.Tr("settings")
 	ctx.Data["PageIsSettingsSSHKeys"] = true
 
@@ -318,7 +328,7 @@ func SettingsSSHKeysPost(ctx *context.Context, form auth.AddSSHKeyForm) {
 		return
 	}
 
-	content, err := models.CheckPublicKeyString(form.Content)
+	content, err := models.CheckPublicKeyString(f.Content)
 	if err != nil {
 		if models.IsErrKeyUnableVerify(err) {
 			ctx.Flash.Info(ctx.Tr("form.unable_verify_ssh_key"))
@@ -329,22 +339,22 @@ func SettingsSSHKeysPost(ctx *context.Context, form auth.AddSSHKeyForm) {
 		}
 	}
 
-	if _, err = models.AddPublicKey(ctx.User.ID, form.Title, content); err != nil {
+	if _, err = models.AddPublicKey(ctx.User.ID, f.Title, content); err != nil {
 		ctx.Data["HasError"] = true
 		switch {
 		case models.IsErrKeyAlreadyExist(err):
 			ctx.Data["Err_Content"] = true
-			ctx.RenderWithErr(ctx.Tr("settings.ssh_key_been_used"), SETTINGS_SSH_KEYS, &form)
+			ctx.RenderWithErr(ctx.Tr("settings.ssh_key_been_used"), SETTINGS_SSH_KEYS, &f)
 		case models.IsErrKeyNameAlreadyUsed(err):
 			ctx.Data["Err_Title"] = true
-			ctx.RenderWithErr(ctx.Tr("settings.ssh_key_name_used"), SETTINGS_SSH_KEYS, &form)
+			ctx.RenderWithErr(ctx.Tr("settings.ssh_key_name_used"), SETTINGS_SSH_KEYS, &f)
 		default:
 			ctx.Handle(500, "AddPublicKey", err)
 		}
 		return
 	}
 
-	ctx.Flash.Success(ctx.Tr("settings.add_key_success", form.Title))
+	ctx.Flash.Success(ctx.Tr("settings.add_key_success", f.Title))
 	ctx.Redirect(setting.AppSubUrl + "/user/settings/ssh")
 }
 
@@ -374,7 +384,7 @@ func SettingsApplications(ctx *context.Context) {
 	ctx.HTML(200, SETTINGS_APPLICATIONS)
 }
 
-func SettingsApplicationsPost(ctx *context.Context, form auth.NewAccessTokenForm) {
+func SettingsApplicationsPost(ctx *context.Context, f form.NewAccessToken) {
 	ctx.Data["Title"] = ctx.Tr("settings")
 	ctx.Data["PageIsSettingsApplications"] = true
 
@@ -391,7 +401,7 @@ func SettingsApplicationsPost(ctx *context.Context, form auth.NewAccessTokenForm
 
 	t := &models.AccessToken{
 		UID:  ctx.User.ID,
-		Name: form.Name,
+		Name: f.Name,
 	}
 	if err := models.NewAccessToken(t); err != nil {
 		ctx.Handle(500, "NewAccessToken", err)
@@ -405,7 +415,7 @@ func SettingsApplicationsPost(ctx *context.Context, form auth.NewAccessTokenForm
 }
 
 func SettingsDeleteApplication(ctx *context.Context) {
-	if err := models.DeleteAccessTokenByID(ctx.QueryInt64("id")); err != nil {
+	if err := models.DeleteAccessTokenOfUserByID(ctx.User.ID, ctx.QueryInt64("id")); err != nil {
 		ctx.Flash.Error("DeleteAccessTokenByID: " + err.Error())
 	} else {
 		ctx.Flash.Success(ctx.Tr("settings.delete_token_success"))
@@ -416,13 +426,79 @@ func SettingsDeleteApplication(ctx *context.Context) {
 	})
 }
 
+func SettingsOrganizations(ctx *context.Context) {
+	ctx.Data["Title"] = ctx.Tr("settings")
+	ctx.Data["PageIsSettingsOrganizations"] = true
+
+	orgs, err := models.GetOrgsByUserID(ctx.User.ID, true)
+	if err != nil {
+		ctx.Handle(500, "GetOrgsByUserID", err)
+		return
+	}
+	ctx.Data["Orgs"] = orgs
+
+	ctx.HTML(200, SETTINGS_ORGANIZATIONS)
+}
+
+func SettingsLeaveOrganization(ctx *context.Context) {
+	err := models.RemoveOrgUser(ctx.QueryInt64("id"), ctx.User.ID)
+	if err != nil {
+		if models.IsErrLastOrgOwner(err) {
+			ctx.Flash.Error(ctx.Tr("form.last_org_owner"))
+		} else {
+			ctx.Handle(500, "RemoveOrgUser", err)
+			return
+		}
+	}
+
+	ctx.JSON(200, map[string]interface{}{
+		"redirect": setting.AppSubUrl + "/user/settings/organizations",
+	})
+}
+
+func SettingsRepos(ctx *context.Context) {
+	ctx.Data["Title"] = ctx.Tr("settings")
+	ctx.Data["PageIsSettingsRepositories"] = true
+
+	repos, err := models.GetUserAndCollaborativeRepositories(ctx.User.ID)
+	if err != nil {
+		ctx.Handle(500, "GetUserAndCollaborativeRepositories", err)
+		return
+	}
+	if err = models.RepositoryList(repos).LoadAttributes(); err != nil {
+		ctx.Handle(500, "LoadAttributes", err)
+		return
+	}
+	ctx.Data["Repos"] = repos
+
+	ctx.HTML(200, SETTINGS_REPOSITORIES)
+}
+
+func SettingsLeaveRepo(ctx *context.Context) {
+	repo, err := models.GetRepositoryByID(ctx.QueryInt64("id"))
+	if err != nil {
+		ctx.NotFoundOrServerError("GetRepositoryByID", errors.IsRepoNotExist, err)
+		return
+	}
+
+	if err = repo.DeleteCollaboration(ctx.User.ID); err != nil {
+		ctx.Handle(500, "DeleteCollaboration", err)
+		return
+	}
+
+	ctx.Flash.Success(ctx.Tr("settings.repos.leave_success", repo.FullName()))
+	ctx.JSON(200, map[string]interface{}{
+		"redirect": setting.AppSubUrl + "/user/settings/repositories",
+	})
+}
+
 func SettingsDelete(ctx *context.Context) {
 	ctx.Data["Title"] = ctx.Tr("settings")
 	ctx.Data["PageIsSettingsDelete"] = true
 
 	if ctx.Req.Method == "POST" {
 		if _, err := models.UserSignIn(ctx.User.Name, ctx.Query("password")); err != nil {
-			if models.IsErrUserNotExist(err) {
+			if errors.IsUserNotExist(err) {
 				ctx.RenderWithErr(ctx.Tr("form.enterred_invalid_password"), SETTINGS_DELETE, nil)
 			} else {
 				ctx.Handle(500, "UserSignIn", err)

@@ -1,7 +1,7 @@
-Gogs - Go Git Service [![Build Status](https://travis-ci.org/gogits/gogs.svg?branch=master)](https://travis-ci.org/gogits/gogs)
+Gogs [![Build Status](https://travis-ci.org/gogits/gogs.svg?branch=master)](https://travis-ci.org/gogits/gogs) [![Build status](https://ci.appveyor.com/api/projects/status/b9uu5ejl933e2wlt/branch/master?svg=true)](https://ci.appveyor.com/project/Unknwon/gogs/branch/master)
 =====================
 
-Gogs (Go Git Service) 是一款极易搭建的自助 Git 服务。
+Gogs 是一款极易搭建的自助 Git 服务。
 
 ## 开发目的
 
@@ -10,7 +10,6 @@ Gogs 的目标是打造一个最简单、最快速和最轻松的方式搭建自
 ## 项目概览
 
 - 有关基本用法和变更日志，请通过 [使用手册](https://gogs.io/docs/intro/) 查看。
-- 您可以到 [Trello Board](https://trello.com/b/uxAoeLUl/gogs-go-git-service) 跟随开发团队的脚步。
 - 想要先睹为快？直接去 [在线体验](https://try.gogs.io/gogs/gogs) 。
 - 使用过程中遇到问题？尝试从 [故障排查](https://gogs.io/docs/intro/troubleshooting.html) 页面或 [用户论坛](https://discuss.gogs.io/) 获取帮助。
 - 希望帮助多国语言界面的翻译吗？请立即访问 [详情页面](https://gogs.io/docs/features/i18n.html)！
@@ -23,21 +22,23 @@ Gogs 的目标是打造一个最简单、最快速和最轻松的方式搭建自
 - 支持反向代理子路径
 - 支持用户、组织和仓库管理系统
 - 支持添加和删除仓库协作者
-- 支持仓库和组织级别 Web 钩子（包括 Slack 集成）
+- 支持仓库和组织级别 Web 钩子（包括 Slack 和 Discord 集成）
 - 支持仓库 Git 钩子和部署密钥
-- 支持仓库工单（Issue）、合并请求（Pull Request）以及 Wiki
+- 支持仓库工单（Issue）、合并请求（Pull Request）、Wiki 和保护分支
 - 支持迁移和镜像仓库以及它的 Wiki
 - 支持在线编辑仓库文件和 Wiki
 - 支持自定义源的 Gravatar 和 Federated Avatar
+- 支持 Jupyter Notebook
 - 支持邮件服务
 - 支持后台管理面板
-- 支持 MySQL、PostgreSQL、SQLite3 和 [TiDB](https://github.com/pingcap/tidb)（实验性支持） 数据库
-- 支持多语言本地化（[18 种语言]([more](https://crowdin.com/project/gogs))）
+- 支持 MySQL、PostgreSQL、SQLite3、MSSQL 和 [TiDB](https://github.com/pingcap/tidb)（实验性支持） 数据库
+- 支持多语言本地化（[23 种语言]([more](https://crowdin.com/project/gogs))）
 
-## 系统要求
+## 硬件要求
 
 - 最低的系统硬件要求为一个廉价的树莓派
-- 如果用于团队项目，建议使用 2 核 CPU 及 1GB 内存
+- 如果用于团队项目管理，建议使用 2 核 CPU 及 512MB 内存
+- 当团队成员大量增加时，可以考虑添加 CPU 核数，内存占用保持不变
 
 ## 浏览器支持
 
@@ -66,7 +67,6 @@ Gogs 的目标是打造一个最简单、最快速和最轻松的方式搭建自
 - [OpenShift](https://github.com/tkisme/gogs-openshift)
 - [Cloudron](https://cloudron.io/appstore.html#io.gogs.cloudronapp)
 - [Scaleway](https://www.scaleway.com/imagehub/gogs/)
-- [Portal](https://portaldemo.xyz/cloud/)
 - [Sandstorm](https://github.com/cem/gogs-sandstorm)
 - [sloppy.io](https://github.com/sloppyio/quickstarters/tree/master/gogs)
 - [YunoHost](https://github.com/mbugeia/gogs_ynh)
@@ -75,6 +75,7 @@ Gogs 的目标是打造一个最简单、最快速和最轻松的方式搭建自
 ## 软件及服务支持
 
 - [Drone](https://github.com/drone/drone)（CI）
+- [Jenkins](https://wiki.jenkins-ci.org/display/JENKINS/Gogs+Webhook+Plugin)（CI）
 - [Fabric8](http://fabric8.io/)（DevOps）
 - [Taiga](https://taiga.io/)（项目管理）
 - [Puppet](https://forge.puppetlabs.com/Siteminds/gogs)（IT）
@@ -89,17 +90,14 @@ Gogs 的目标是打造一个最简单、最快速和最轻松的方式搭建自
 
 ## 特别鸣谢
 
-- 基于 [Macaron](https://github.com/go-macaron/macaron) 的路由与中间件机制。
-- 基于 [GoBlog](https://github.com/fuxiaohei/goblog) 修改的系统监视状态。
-- 感谢 [Rocker](http://weibo.com/rocker1989) 设计的 Logo。
+- 感谢 [Egon Elbre](https://twitter.com/egonelbre) 设计的 Logo。
 - 感谢 [Crowdin](https://crowdin.com/project/gogs) 提供免费的开源项目本地化支持。
 - 感谢 [DigitalOcean](https://www.digitalocean.com) 提供主站和体验站点的服务器赞助。
 - 感谢 [KeyCDN](https://www.keycdn.com/) 和 [七牛云存储](http://www.qiniu.com/) 提供 CDN 服务赞助。
 
 ## 贡献成员
 
-- 前团队成员 [@lunny](https://github.com/lunny)、[@fuxiaohei](https://github.com/fuxiaohei) 和 [@slene](https://github.com/slene)。
-- 您可以通过查看 [贡献者页面](https://github.com/gogits/gogs/graphs/contributors) 获取完整的贡献者列表。
+- 您可以通过查看 [贡献者页面](https://github.com/gogits/gogs/graphs/contributors) 获取 TOP 100 的贡献者列表。
 - 您可以通过查看 [TRANSLATORS](conf/locale/TRANSLATORS) 文件获取公开的翻译人员列表。
 
 ## 授权许可

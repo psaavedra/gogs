@@ -5,7 +5,9 @@
 package models
 
 import (
+	"bufio"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -13,10 +15,13 @@ import (
 	"path"
 	"strings"
 
+	"github.com/Unknwon/com"
+	_ "github.com/denisenkom/go-mssqldb"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/go-xorm/core"
 	"github.com/go-xorm/xorm"
 	_ "github.com/lib/pq"
+	log "gopkg.in/clog.v1"
 
 	"github.com/gogits/gogs/models/migrations"
 	"github.com/gogits/gogs/modules/setting"
@@ -34,7 +39,8 @@ type Engine interface {
 	InsertOne(interface{}) (int64, error)
 	Iterate(interface{}, xorm.IterFunc) error
 	Sql(string, ...interface{}) *xorm.Session
-	Where(string, ...interface{}) *xorm.Session
+	Table(interface{}) *xorm.Session
+	Where(interface{}, ...interface{}) *xorm.Session
 }
 
 func sessionRelease(sess *xorm.Session) {
@@ -54,18 +60,17 @@ var (
 	}
 
 	EnableSQLite3 bool
-	EnableTiDB    bool
 )
 
 func init() {
 	tables = append(tables,
 		new(User), new(PublicKey), new(AccessToken),
-		new(Repository), new(DeployKey), new(Collaboration), new(Access),
+		new(Repository), new(DeployKey), new(Collaboration), new(Access), new(Upload),
 		new(Watch), new(Star), new(Follow), new(Action),
 		new(Issue), new(PullRequest), new(Comment), new(Attachment), new(IssueUser),
 		new(Label), new(IssueLabel), new(Milestone),
-		new(Mirror), new(Release), new(LoginSource), new(Webhook),
-		new(UpdateTask), new(HookTask),
+		new(Mirror), new(Release), new(LoginSource), new(Webhook), new(HookTask),
+		new(ProtectBranch), new(ProtectBranchWhitelist),
 		new(Team), new(OrgUser), new(TeamUser), new(TeamRepo),
 		new(Notice), new(EmailAddress))
 
@@ -85,8 +90,8 @@ func LoadConfigs() {
 		setting.UseMySQL = true
 	case "postgres":
 		setting.UsePostgreSQL = true
-	case "tidb":
-		setting.UseTiDB = true
+	case "mssql":
+		setting.UseMSSQL = true
 	}
 	DbCfg.Host = sec.Key("HOST").String()
 	DbCfg.Name = sec.Key("NAME").String()
@@ -107,6 +112,20 @@ func parsePostgreSQLHostPort(info string) (string, string) {
 		idx := strings.LastIndex(info, ":")
 		host = info[:idx]
 		port = info[idx+1:]
+	} else if len(info) > 0 {
+		host = info
+	}
+	return host, port
+}
+
+func parseMSSQLHostPort(info string) (string, string) {
+	host, port := "127.0.0.1", "1433"
+	if strings.Contains(info, ":") {
+		host = strings.Split(info, ":")[0]
+		port = strings.Split(info, ":")[1]
+	} else if strings.Contains(info, ",") {
+		host = strings.Split(info, ",")[0]
+		port = strings.TrimSpace(strings.Split(info, ",")[1])
 	} else if len(info) > 0 {
 		host = info
 	}
@@ -137,6 +156,9 @@ func getEngine() (*xorm.Engine, error) {
 			connStr = fmt.Sprintf("postgres://%s:%s@%s:%s/%s%ssslmode=%s",
 				url.QueryEscape(DbCfg.User), url.QueryEscape(DbCfg.Passwd), host, port, DbCfg.Name, Param, DbCfg.SSLMode)
 		}
+	case "mssql":
+		host, port := parseMSSQLHostPort(DbCfg.Host)
+		connStr = fmt.Sprintf("server=%s; port=%s; database=%s; user id=%s; password=%s;", host, port, DbCfg.Name, DbCfg.User, DbCfg.Passwd)
 	case "sqlite3":
 		if !EnableSQLite3 {
 			return nil, errors.New("This binary version does not build support for SQLite3.")
@@ -145,14 +167,6 @@ func getEngine() (*xorm.Engine, error) {
 			return nil, fmt.Errorf("Fail to create directories: %v", err)
 		}
 		connStr = "file:" + DbCfg.Path + "?cache=shared&mode=rwc"
-	case "tidb":
-		if !EnableTiDB {
-			return nil, errors.New("This binary version does not build support for TiDB.")
-		}
-		if err := os.MkdirAll(path.Dir(DbCfg.Path), os.ModePerm); err != nil {
-			return nil, fmt.Errorf("Fail to create directories: %v", err)
-		}
-		connStr = "goleveldb://" + DbCfg.Path
 	default:
 		return nil, fmt.Errorf("Unknown database type: %s", DbCfg.Type)
 	}
@@ -179,14 +193,23 @@ func SetEngine() (err error) {
 
 	// WARNING: for serv command, MUST remove the output to os.stdout,
 	// so use log file to instead print to stdout.
-	logPath := path.Join(setting.LogRootPath, "xorm.log")
-	os.MkdirAll(path.Dir(logPath), os.ModePerm)
-
-	f, err := os.Create(logPath)
+	sec := setting.Cfg.Section("log.xorm")
+	logger, err := log.NewFileWriter(path.Join(setting.LogRootPath, "xorm.log"),
+		log.FileRotationConfig{
+			Rotate:  sec.Key("ROTATE").MustBool(true),
+			Daily:   sec.Key("ROTATE_DAILY").MustBool(true),
+			MaxSize: sec.Key("MAX_SIZE").MustInt64(100) * 1024 * 1024,
+			MaxDays: sec.Key("MAX_DAYS").MustInt64(3),
+		})
 	if err != nil {
-		return fmt.Errorf("Fail to create xorm.log: %v", err)
+		return fmt.Errorf("Fail to create 'xorm.log': %v", err)
 	}
-	x.SetLogger(xorm.NewSimpleLogger(f))
+
+	if setting.ProdMode {
+		x.SetLogger(xorm.NewSimpleLogger3(logger, xorm.DEFAULT_LOG_PREFIX, xorm.DEFAULT_LOG_FLAG, core.LOG_WARNING))
+	} else {
+		x.SetLogger(xorm.NewSimpleLogger(logger))
+	}
 	x.ShowSQL(true)
 	return nil
 }
@@ -239,7 +262,6 @@ func GetStatistic() (stats Statistic) {
 	stats.Counter.Label, _ = x.Count(new(Label))
 	stats.Counter.HookTask, _ = x.Count(new(HookTask))
 	stats.Counter.Team, _ = x.Count(new(Team))
-	stats.Counter.UpdateTask, _ = x.Count(new(UpdateTask))
 	stats.Counter.Attachment, _ = x.Count(new(Attachment))
 	return
 }
@@ -248,7 +270,89 @@ func Ping() error {
 	return x.Ping()
 }
 
-// DumpDatabase dumps all data from database to file system.
-func DumpDatabase(filePath string) error {
-	return x.DumpAllToFile(filePath)
+// The version table. Should have only one row with id==1
+type Version struct {
+	ID      int64
+	Version int64
+}
+
+// DumpDatabase dumps all data from database to file system in JSON format.
+func DumpDatabase(dirPath string) (err error) {
+	os.MkdirAll(dirPath, os.ModePerm)
+	// Purposely create a local variable to not modify global variable
+	tables := append(tables, new(Version))
+	for _, table := range tables {
+		tableName := strings.TrimPrefix(fmt.Sprintf("%T", table), "*models.")
+		tableFile := path.Join(dirPath, tableName+".json")
+		f, err := os.Create(tableFile)
+		if err != nil {
+			return fmt.Errorf("fail to create JSON file: %v", err)
+		}
+
+		if err = x.Asc("id").Iterate(table, func(idx int, bean interface{}) (err error) {
+			enc := json.NewEncoder(f)
+			return enc.Encode(bean)
+		}); err != nil {
+			f.Close()
+			return fmt.Errorf("fail to dump table '%s': %v", tableName, err)
+		}
+		f.Close()
+	}
+	return nil
+}
+
+// ImportDatabase imports data from backup archive.
+func ImportDatabase(dirPath string) (err error) {
+	// Purposely create a local variable to not modify global variable
+	tables := append(tables, new(Version))
+	for _, table := range tables {
+		tableName := strings.TrimPrefix(fmt.Sprintf("%T", table), "*models.")
+		tableFile := path.Join(dirPath, tableName+".json")
+		if !com.IsExist(tableFile) {
+			continue
+		}
+
+		if err = x.DropTables(table); err != nil {
+			return fmt.Errorf("fail to drop table '%s': %v", tableName, err)
+		} else if err = x.Sync2(table); err != nil {
+			return fmt.Errorf("fail to sync table '%s': %v", tableName, err)
+		}
+
+		f, err := os.Open(tableFile)
+		if err != nil {
+			return fmt.Errorf("fail to open JSON file: %v", err)
+		}
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			switch bean := table.(type) {
+			case *LoginSource:
+				meta := make(map[string]interface{})
+				if err = json.Unmarshal(scanner.Bytes(), &meta); err != nil {
+					return fmt.Errorf("fail to unmarshal to map: %v", err)
+				}
+
+				tp := LoginType(com.StrTo(com.ToStr(meta["Type"])).MustInt64())
+				switch tp {
+				case LOGIN_LDAP, LOGIN_DLDAP:
+					bean.Cfg = new(LDAPConfig)
+				case LOGIN_SMTP:
+					bean.Cfg = new(SMTPConfig)
+				case LOGIN_PAM:
+					bean.Cfg = new(PAMConfig)
+				default:
+					return fmt.Errorf("unrecognized login source type:: %v", tp)
+				}
+				table = bean
+			}
+
+			if err = json.Unmarshal(scanner.Bytes(), table); err != nil {
+				return fmt.Errorf("fail to unmarshal to struct: %v", err)
+			}
+
+			if _, err = x.Insert(table); err != nil {
+				return fmt.Errorf("fail to insert strcut: %v", err)
+			}
+		}
+	}
+	return nil
 }

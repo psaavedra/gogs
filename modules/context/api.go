@@ -9,10 +9,10 @@ import (
 	"strings"
 
 	"github.com/Unknwon/paginater"
+	log "gopkg.in/clog.v1"
 	"gopkg.in/macaron.v1"
 
 	"github.com/gogits/gogs/modules/base"
-	"github.com/gogits/gogs/modules/log"
 	"github.com/gogits/gogs/modules/setting"
 )
 
@@ -32,7 +32,7 @@ func (ctx *APIContext) Error(status int, title string, obj interface{}) {
 	}
 
 	if status == 500 {
-		log.Error(4, "%s: %s", title, message)
+		log.Error(3, "%s: %s", title, message)
 	}
 
 	ctx.JSON(status, map[string]string{

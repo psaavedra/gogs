@@ -12,6 +12,7 @@ import (
 	"github.com/Unknwon/paginater"
 
 	"github.com/gogits/gogs/models"
+	"github.com/gogits/gogs/models/errors"
 	"github.com/gogits/gogs/modules/base"
 	"github.com/gogits/gogs/modules/context"
 	"github.com/gogits/gogs/modules/setting"
@@ -19,6 +20,7 @@ import (
 
 const (
 	DASHBOARD base.TplName = "user/dashboard/dashboard"
+	NEWS_FEED base.TplName = "user/dashboard/feeds"
 	ISSUES    base.TplName = "user/dashboard/issues"
 	PROFILE   base.TplName = "user/profile"
 	ORG_HOME  base.TplName = "org/home"
@@ -32,11 +34,7 @@ func getDashboardContextUser(ctx *context.Context) *models.User {
 		// Organization.
 		org, err := models.GetUserByName(orgName)
 		if err != nil {
-			if models.IsErrUserNotExist(err) {
-				ctx.Handle(404, "GetUserByName", err)
-			} else {
-				ctx.Handle(500, "GetUserByName", err)
-			}
+			ctx.NotFoundOrServerError("GetUserByName", errors.IsUserNotExist, err)
 			return nil
 		}
 		ctxUser = org
@@ -55,8 +53,8 @@ func getDashboardContextUser(ctx *context.Context) *models.User {
 // retrieveFeeds loads feeds from database by given context user.
 // The user could be organization so it is not always the logged in user,
 // which is why we have to explicitly pass the context user ID.
-func retrieveFeeds(ctx *context.Context, ctxUser *models.User, userID, offset int64, isProfile bool) {
-	actions, err := models.GetFeeds(ctxUser, userID, offset, isProfile)
+func retrieveFeeds(ctx *context.Context, ctxUser *models.User, userID int64, isProfile bool) {
+	actions, err := models.GetFeeds(ctxUser, userID, ctx.QueryInt64("after_id"), isProfile)
 	if err != nil {
 		ctx.Handle(500, "GetFeeds", err)
 		return
@@ -71,7 +69,7 @@ func retrieveFeeds(ctx *context.Context, ctxUser *models.User, userID, offset in
 		if !ok {
 			u, err := models.GetUserByName(act.ActUserName)
 			if err != nil {
-				if models.IsErrUserNotExist(err) {
+				if errors.IsUserNotExist(err) {
 					continue
 				}
 				ctx.Handle(500, "GetUserByName", err)
@@ -84,11 +82,26 @@ func retrieveFeeds(ctx *context.Context, ctxUser *models.User, userID, offset in
 		feeds = append(feeds, act)
 	}
 	ctx.Data["Feeds"] = feeds
+	if len(feeds) > 0 {
+		afterID := feeds[len(feeds)-1].ID
+		ctx.Data["AfterID"] = afterID
+		ctx.Header().Set("X-AJAX-URL", fmt.Sprintf("%s?after_id=%d", ctx.Data["Link"], afterID))
+	}
 }
 
 func Dashboard(ctx *context.Context) {
 	ctxUser := getDashboardContextUser(ctx)
 	if ctx.Written() {
+		return
+	}
+
+	retrieveFeeds(ctx, ctxUser, ctx.User.ID, false)
+	if ctx.Written() {
+		return
+	}
+
+	if ctx.Req.Header.Get("X-AJAX") == "true" {
+		ctx.HTML(200, NEWS_FEED)
 		return
 	}
 
@@ -146,10 +159,6 @@ func Dashboard(ctx *context.Context) {
 	ctx.Data["MirrorCount"] = len(mirrors)
 	ctx.Data["Mirrors"] = mirrors
 
-	retrieveFeeds(ctx, ctxUser, ctx.User.ID, 0, false)
-	if ctx.Written() {
-		return
-	}
 	ctx.HTML(200, DASHBOARD)
 }
 
@@ -168,39 +177,40 @@ func Issues(ctx *context.Context) {
 		return
 	}
 
-	// Organization does not have view type and filter mode.
 	var (
-		viewType   string
 		sortType   = ctx.Query("sort")
-		filterMode = models.FM_ALL
-		assigneeID int64
-		posterID   int64
+		filterMode = models.FILTER_MODE_YOUR_REPOS
 	)
-	if ctxUser.IsOrganization() {
-		viewType = "all"
-	} else {
-		viewType = ctx.Query("type")
-		types := []string{"assigned", "created_by"}
-		if !com.IsSliceContainsStr(types, viewType) {
-			viewType = "all"
-		}
 
-		switch viewType {
-		case "assigned":
-			filterMode = models.FM_ASSIGN
-			assigneeID = ctxUser.ID
-		case "created_by":
-			filterMode = models.FM_CREATE
-			posterID = ctxUser.ID
+	// Note: Organization does not have view type and filter mode.
+	if !ctxUser.IsOrganization() {
+		viewType := ctx.Query("type")
+		types := []string{
+			string(models.FILTER_MODE_YOUR_REPOS),
+			string(models.FILTER_MODE_ASSIGN),
+			string(models.FILTER_MODE_CREATE),
 		}
+		if !com.IsSliceContainsStr(types, viewType) {
+			viewType = string(models.FILTER_MODE_YOUR_REPOS)
+		}
+		filterMode = models.FilterMode(viewType)
+	}
+
+	page := ctx.QueryInt("page")
+	if page <= 1 {
+		page = 1
 	}
 
 	repoID := ctx.QueryInt64("repo")
 	isShowClosed := ctx.Query("state") == "closed"
 
 	// Get repositories.
-	var err error
-	var repos []*models.Repository
+	var (
+		err         error
+		repos       []*models.Repository
+		userRepoIDs []int64
+		showRepos   = make([]*models.Repository, 0, 10)
+	)
 	if ctxUser.IsOrganization() {
 		repos, _, err = ctxUser.GetUserRepositories(ctx.User.ID, 1, ctxUser.NumRepos)
 		if err != nil {
@@ -215,47 +225,97 @@ func Issues(ctx *context.Context) {
 		repos = ctxUser.Repos
 	}
 
-	allCount := 0
-	repoIDs := make([]int64, 0, len(repos))
-	showRepos := make([]*models.Repository, 0, len(repos))
+	userRepoIDs = make([]int64, 0, len(repos))
 	for _, repo := range repos {
-		if (isPullList && repo.NumPulls == 0) ||
-			(!isPullList &&
-				(!repo.EnableIssues || repo.EnableExternalTracker || repo.NumIssues == 0)) {
+		userRepoIDs = append(userRepoIDs, repo.ID)
+
+		if filterMode != models.FILTER_MODE_YOUR_REPOS {
 			continue
 		}
 
-		repoIDs = append(repoIDs, repo.ID)
-
 		if isPullList {
-			allCount += repo.NumOpenPulls
-			repo.NumOpenIssues = repo.NumOpenPulls
-			repo.NumClosedIssues = repo.NumClosedPulls
+			if isShowClosed && repo.NumClosedPulls == 0 ||
+				!isShowClosed && repo.NumOpenPulls == 0 {
+				continue
+			}
 		} else {
-			allCount += repo.NumOpenIssues
+			if !repo.EnableIssues || repo.EnableExternalTracker ||
+				isShowClosed && repo.NumClosedIssues == 0 ||
+				!isShowClosed && repo.NumOpenIssues == 0 {
+				continue
+			}
 		}
 
-		if filterMode != models.FM_ALL {
-			// Calculate repository issue count with filter mode.
-			numOpen, numClosed := repo.IssueStats(ctxUser.ID, filterMode, isPullList)
-			repo.NumOpenIssues, repo.NumClosedIssues = int(numOpen), int(numClosed)
-		}
+		showRepos = append(showRepos, repo)
+	}
 
-		if repo.ID == repoID ||
-			(isShowClosed && repo.NumClosedIssues > 0) ||
-			(!isShowClosed && repo.NumOpenIssues > 0) {
-			showRepos = append(showRepos, repo)
+	// Filter repositories if the page shows issues.
+	if !isPullList {
+		userRepoIDs, err = models.FilterRepositoryWithIssues(userRepoIDs)
+		if err != nil {
+			ctx.Handle(500, "FilterRepositoryWithIssues", err)
+			return
 		}
 	}
-	ctx.Data["Repos"] = showRepos
 
-	issueStats := models.GetUserIssueStats(repoID, ctxUser.ID, repoIDs, filterMode, isPullList)
-	issueStats.AllCount = int64(allCount)
-
-	page := ctx.QueryInt("page")
-	if page <= 1 {
-		page = 1
+	issueOptions := &models.IssuesOptions{
+		RepoID:   repoID,
+		Page:     page,
+		IsClosed: isShowClosed,
+		IsPull:   isPullList,
+		SortType: sortType,
 	}
+	switch filterMode {
+	case models.FILTER_MODE_YOUR_REPOS:
+		// Get all issues from repositories from this user.
+		if userRepoIDs == nil {
+			issueOptions.RepoIDs = []int64{-1}
+		} else {
+			issueOptions.RepoIDs = userRepoIDs
+		}
+
+	case models.FILTER_MODE_ASSIGN:
+		// Get all issues assigned to this user.
+		issueOptions.AssigneeID = ctxUser.ID
+
+	case models.FILTER_MODE_CREATE:
+		// Get all issues created by this user.
+		issueOptions.PosterID = ctxUser.ID
+	}
+
+	issues, err := models.Issues(issueOptions)
+	if err != nil {
+		ctx.Handle(500, "Issues", err)
+		return
+	}
+
+	if repoID > 0 {
+		repo, err := models.GetRepositoryByID(repoID)
+		if err != nil {
+			ctx.Handle(500, "GetRepositoryByID", fmt.Errorf("[#%d] %v", repoID, err))
+			return
+		}
+
+		if err = repo.GetOwner(); err != nil {
+			ctx.Handle(500, "GetOwner", fmt.Errorf("[#%d] %v", repoID, err))
+			return
+		}
+
+		// Check if user has access to given repository.
+		if !repo.IsOwnedBy(ctxUser.ID) && !repo.HasAccess(ctxUser.ID) {
+			ctx.Handle(404, "Issues", fmt.Errorf("#%d", repoID))
+			return
+		}
+	}
+
+	for _, issue := range issues {
+		if err = issue.Repo.GetOwner(); err != nil {
+			ctx.Handle(500, "GetOwner", fmt.Errorf("[#%d] %v", issue.RepoID, err))
+			return
+		}
+	}
+
+	issueStats := models.GetUserIssueStats(repoID, ctxUser.ID, userRepoIDs, filterMode, isPullList)
 
 	var total int
 	if !isShowClosed {
@@ -263,45 +323,16 @@ func Issues(ctx *context.Context) {
 	} else {
 		total = int(issueStats.ClosedCount)
 	}
-	ctx.Data["Page"] = paginater.New(total, setting.UI.IssuePagingNum, page, 5)
 
-	// Get issues.
-	issues, err := models.Issues(&models.IssuesOptions{
-		UserID:     ctxUser.ID,
-		AssigneeID: assigneeID,
-		RepoID:     repoID,
-		PosterID:   posterID,
-		RepoIDs:    repoIDs,
-		Page:       page,
-		IsClosed:   isShowClosed,
-		IsPull:     isPullList,
-		SortType:   sortType,
-	})
-	if err != nil {
-		ctx.Handle(500, "Issues", err)
-		return
-	}
-
-	// Get posters and repository.
-	for i := range issues {
-		issues[i].Repo, err = models.GetRepositoryByID(issues[i].RepoID)
-		if err != nil {
-			ctx.Handle(500, "GetRepositoryByID", fmt.Errorf("[#%d]%v", issues[i].ID, err))
-			return
-		}
-
-		if err = issues[i].Repo.GetOwner(); err != nil {
-			ctx.Handle(500, "GetOwner", fmt.Errorf("[#%d]%v", issues[i].ID, err))
-			return
-		}
-	}
 	ctx.Data["Issues"] = issues
-
+	ctx.Data["Repos"] = showRepos
+	ctx.Data["Page"] = paginater.New(total, setting.UI.IssuePagingNum, page, 5)
 	ctx.Data["IssueStats"] = issueStats
-	ctx.Data["ViewType"] = viewType
+	ctx.Data["ViewType"] = string(filterMode)
 	ctx.Data["SortType"] = sortType
 	ctx.Data["RepoID"] = repoID
 	ctx.Data["IsShowClosed"] = isShowClosed
+
 	if isShowClosed {
 		ctx.Data["State"] = "closed"
 	} else {
@@ -355,7 +386,12 @@ func showOrgProfile(ctx *context.Context) {
 		ctx.Data["Repos"] = repos
 	} else {
 		showPrivate := ctx.IsSigned && ctx.User.IsAdmin
-		repos, err = models.GetUserRepositories(org.ID, showPrivate, page, setting.UI.User.RepoPagingNum)
+		repos, err = models.GetUserRepositories(&models.UserRepoOptions{
+			UserID:   org.ID,
+			Private:  showPrivate,
+			Page:     page,
+			PageSize: setting.UI.User.RepoPagingNum,
+		})
 		if err != nil {
 			ctx.Handle(500, "GetRepositories", err)
 			return
@@ -379,11 +415,7 @@ func showOrgProfile(ctx *context.Context) {
 func Email2User(ctx *context.Context) {
 	u, err := models.GetUserByEmail(ctx.Query("email"))
 	if err != nil {
-		if models.IsErrUserNotExist(err) {
-			ctx.Handle(404, "GetUserByEmail", err)
-		} else {
-			ctx.Handle(500, "GetUserByEmail", err)
-		}
+		ctx.NotFoundOrServerError("GetUserByEmail", errors.IsUserNotExist, err)
 		return
 	}
 	ctx.Redirect(setting.AppSubUrl + "/user/" + u.Name)

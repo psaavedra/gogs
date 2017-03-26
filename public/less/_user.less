@@ -19,12 +19,34 @@
 				}
 			}
 		}
+		&.organizations .orgs {
+			&.non-empty {
+				padding: 0;
+			}
+			.item {
+				padding: 10px;
+				.button {
+					margin-top: 5px;
+					margin-right: 8px;
+				}
+			}
+		}
+		&.repositories .repos {
+			padding: 0;
+			.item {
+				padding: 15px;
+				height: 46px;
+				.button {
+					margin-top: -5px;
+				}
+			}
+		}
 	}
 
 	&.profile {
 		.ui.card {
-			#profile-avatar {
-				height: 290px;
+			.header {
+				word-break: break-all;
 			}
 			.username {
 				display: block;

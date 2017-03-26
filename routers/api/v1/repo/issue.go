@@ -11,23 +11,27 @@ import (
 	api "github.com/gogits/go-gogs-client"
 
 	"github.com/gogits/gogs/models"
+	"github.com/gogits/gogs/models/errors"
 	"github.com/gogits/gogs/modules/context"
 	"github.com/gogits/gogs/modules/setting"
 )
 
-func ListIssues(ctx *context.APIContext) {
-	issues, err := models.Issues(&models.IssuesOptions{
-		RepoID: ctx.Repo.Repository.ID,
-		Page:   ctx.QueryInt("page"),
-	})
+func listIssues(ctx *context.APIContext, opts *models.IssuesOptions) {
+	issues, err := models.Issues(opts)
 	if err != nil {
 		ctx.Error(500, "Issues", err)
 		return
 	}
 
+	count, err := models.IssuesCount(opts)
+	if err != nil {
+		ctx.Error(500, "IssuesCount", err)
+		return
+	}
+
+	// FIXME: use IssueList to improve performance.
 	apiIssues := make([]*api.Issue, len(issues))
 	for i := range issues {
-		// FIXME: use IssueList to improve performance.
 		if err = issues[i].LoadAttributes(); err != nil {
 			ctx.Error(500, "LoadAttributes", err)
 			return
@@ -35,21 +39,38 @@ func ListIssues(ctx *context.APIContext) {
 		apiIssues[i] = issues[i].APIFormat()
 	}
 
-	ctx.SetLinkHeader(ctx.Repo.Repository.NumIssues, setting.UI.IssuePagingNum)
+	ctx.SetLinkHeader(int(count), setting.UI.IssuePagingNum)
 	ctx.JSON(200, &apiIssues)
+}
+
+func ListUserIssues(ctx *context.APIContext) {
+	opts := models.IssuesOptions{
+		AssigneeID: ctx.User.ID,
+		Page:       ctx.QueryInt("page"),
+	}
+
+	listIssues(ctx, &opts)
+}
+
+func ListIssues(ctx *context.APIContext) {
+	opts := models.IssuesOptions{
+		RepoID: ctx.Repo.Repository.ID,
+		Page:   ctx.QueryInt("page"),
+	}
+
+	listIssues(ctx, &opts)
 }
 
 func GetIssue(ctx *context.APIContext) {
 	issue, err := models.GetIssueByIndex(ctx.Repo.Repository.ID, ctx.ParamsInt64(":index"))
 	if err != nil {
-		if models.IsErrIssueNotExist(err) {
+		if errors.IsIssueNotExist(err) {
 			ctx.Status(404)
 		} else {
 			ctx.Error(500, "GetIssueByIndex", err)
 		}
 		return
 	}
-
 	ctx.JSON(200, issue.APIFormat())
 }
 
@@ -66,7 +87,7 @@ func CreateIssue(ctx *context.APIContext, form api.CreateIssueOption) {
 		if len(form.Assignee) > 0 {
 			assignee, err := models.GetUserByName(form.Assignee)
 			if err != nil {
-				if models.IsErrUserNotExist(err) {
+				if errors.IsUserNotExist(err) {
 					ctx.Error(422, "", fmt.Sprintf("Assignee does not exist: [name: %s]", form.Assignee))
 				} else {
 					ctx.Error(500, "GetUserByName", err)
@@ -105,7 +126,7 @@ func CreateIssue(ctx *context.APIContext, form api.CreateIssueOption) {
 func EditIssue(ctx *context.APIContext, form api.EditIssueOption) {
 	issue, err := models.GetIssueByIndex(ctx.Repo.Repository.ID, ctx.ParamsInt64(":index"))
 	if err != nil {
-		if models.IsErrIssueNotExist(err) {
+		if errors.IsIssueNotExist(err) {
 			ctx.Status(404)
 		} else {
 			ctx.Error(500, "GetIssueByIndex", err)
@@ -132,8 +153,8 @@ func EditIssue(ctx *context.APIContext, form api.EditIssueOption) {
 		} else {
 			assignee, err := models.GetUserByName(*form.Assignee)
 			if err != nil {
-				if models.IsErrUserNotExist(err) {
-					ctx.Error(422, "", fmt.Sprintf("Assignee does not exist: [name: %s]", *form.Assignee))
+				if errors.IsUserNotExist(err) {
+					ctx.Error(422, "", fmt.Sprintf("assignee does not exist: [name: %s]", *form.Assignee))
 				} else {
 					ctx.Error(500, "GetUserByName", err)
 				}
@@ -151,7 +172,7 @@ func EditIssue(ctx *context.APIContext, form api.EditIssueOption) {
 		issue.MilestoneID != *form.Milestone {
 		oldMilestoneID := issue.MilestoneID
 		issue.MilestoneID = *form.Milestone
-		if err = models.ChangeMilestoneAssign(issue, oldMilestoneID); err != nil {
+		if err = models.ChangeMilestoneAssign(ctx.User, issue, oldMilestoneID); err != nil {
 			ctx.Error(500, "ChangeMilestoneAssign", err)
 			return
 		}

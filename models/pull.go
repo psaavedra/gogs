@@ -13,14 +13,18 @@ import (
 
 	"github.com/Unknwon/com"
 	"github.com/go-xorm/xorm"
+	log "gopkg.in/clog.v1"
 
 	"github.com/gogits/git-module"
 	api "github.com/gogits/go-gogs-client"
 
-	"github.com/gogits/gogs/modules/log"
+	"github.com/gogits/gogs/models/errors"
 	"github.com/gogits/gogs/modules/process"
 	"github.com/gogits/gogs/modules/setting"
+	"github.com/gogits/gogs/modules/sync"
 )
+
+var PullRequestQueue = sync.NewUniqueQueue(setting.Repository.PullRequestQueueLength)
 
 type PullRequestType int
 
@@ -82,9 +86,23 @@ func (pr *PullRequest) AfterSet(colName string, _ xorm.Cell) {
 
 // Note: don't try to get Issue because will end up recursive querying.
 func (pr *PullRequest) loadAttributes(e Engine) (err error) {
+	if pr.HeadRepo == nil {
+		pr.HeadRepo, err = getRepositoryByID(e, pr.HeadRepoID)
+		if err != nil && !errors.IsRepoNotExist(err) {
+			return fmt.Errorf("getRepositoryByID.(HeadRepo) [%d]: %v", pr.HeadRepoID, err)
+		}
+	}
+
+	if pr.BaseRepo == nil {
+		pr.BaseRepo, err = getRepositoryByID(e, pr.BaseRepoID)
+		if err != nil {
+			return fmt.Errorf("getRepositoryByID.(BaseRepo) [%d]: %v", pr.BaseRepoID, err)
+		}
+	}
+
 	if pr.HasMerged && pr.Merger == nil {
 		pr.Merger, err = getUserByID(e, pr.MergerID)
-		if IsErrUserNotExist(err) {
+		if errors.IsUserNotExist(err) {
 			pr.MergerID = -1
 			pr.Merger = NewGhostUser()
 		} else if err != nil {
@@ -109,23 +127,37 @@ func (pr *PullRequest) LoadIssue() (err error) {
 }
 
 // This method assumes following fields have been assigned with valid values:
-// Required - Issue
-// Optional - Merger
+// Required - Issue, BaseRepo
+// Optional - HeadRepo, Merger
 func (pr *PullRequest) APIFormat() *api.PullRequest {
+	// In case of head repo has been deleted.
+	var apiHeadRepo *api.Repository
+	if pr.HeadRepo == nil {
+		apiHeadRepo = &api.Repository{
+			Name: "deleted",
+		}
+	} else {
+		apiHeadRepo = pr.HeadRepo.APIFormat(nil)
+	}
+
 	apiIssue := pr.Issue.APIFormat()
 	apiPullRequest := &api.PullRequest{
-		ID:        pr.ID,
-		Index:     pr.Index,
-		Poster:    apiIssue.Poster,
-		Title:     apiIssue.Title,
-		Body:      apiIssue.Body,
-		Labels:    apiIssue.Labels,
-		Milestone: apiIssue.Milestone,
-		Assignee:  apiIssue.Assignee,
-		State:     apiIssue.State,
-		Comments:  apiIssue.Comments,
-		HTMLURL:   pr.Issue.HTMLURL(),
-		HasMerged: pr.HasMerged,
+		ID:         pr.ID,
+		Index:      pr.Index,
+		Poster:     apiIssue.Poster,
+		Title:      apiIssue.Title,
+		Body:       apiIssue.Body,
+		Labels:     apiIssue.Labels,
+		Milestone:  apiIssue.Milestone,
+		Assignee:   apiIssue.Assignee,
+		State:      apiIssue.State,
+		Comments:   apiIssue.Comments,
+		HeadBranch: pr.HeadBranch,
+		HeadRepo:   apiHeadRepo,
+		BaseBranch: pr.BaseBranch,
+		BaseRepo:   pr.BaseRepo.APIFormat(nil),
+		HTMLURL:    pr.Issue.HTMLURL(),
+		HasMerged:  pr.HasMerged,
 	}
 
 	if pr.Status != PULL_REQUEST_STATUS_CHECKING {
@@ -141,30 +173,6 @@ func (pr *PullRequest) APIFormat() *api.PullRequest {
 	return apiPullRequest
 }
 
-func (pr *PullRequest) getHeadRepo(e Engine) (err error) {
-	pr.HeadRepo, err = getRepositoryByID(e, pr.HeadRepoID)
-	if err != nil && !IsErrRepoNotExist(err) {
-		return fmt.Errorf("getRepositoryByID(head): %v", err)
-	}
-	return nil
-}
-
-func (pr *PullRequest) GetHeadRepo() error {
-	return pr.getHeadRepo(x)
-}
-
-func (pr *PullRequest) GetBaseRepo() (err error) {
-	if pr.BaseRepo != nil {
-		return nil
-	}
-
-	pr.BaseRepo, err = GetRepositoryByID(pr.BaseRepoID)
-	if err != nil {
-		return fmt.Errorf("GetRepositoryByID(base): %v", err)
-	}
-	return nil
-}
-
 // IsChecking returns true if this pull request is still checking conflict.
 func (pr *PullRequest) IsChecking() bool {
 	return pr.Status == PULL_REQUEST_STATUS_CHECKING
@@ -178,12 +186,6 @@ func (pr *PullRequest) CanAutoMerge() bool {
 // Merge merges pull request to base repository.
 // FIXME: add repoWorkingPull make sure two merges does not happen at same time.
 func (pr *PullRequest) Merge(doer *User, baseGitRepo *git.Repository) (err error) {
-	if err = pr.GetHeadRepo(); err != nil {
-		return fmt.Errorf("GetHeadRepo: %v", err)
-	} else if err = pr.GetBaseRepo(); err != nil {
-		return fmt.Errorf("GetBaseRepo: %v", err)
-	}
-
 	defer func() {
 		go HookQueue.Add(pr.BaseRepo.ID)
 		go AddTestPullRequestTask(doer, pr.BaseRepo.ID, pr.BaseBranch, false)
@@ -276,12 +278,12 @@ func (pr *PullRequest) Merge(doer *User, baseGitRepo *git.Repository) (err error
 	}
 
 	if err = MergePullRequestAction(doer, pr.Issue.Repo, pr.Issue); err != nil {
-		log.Error(4, "MergePullRequestAction [%d]: %v", pr.ID, err)
+		log.Error(2, "MergePullRequestAction [%d]: %v", pr.ID, err)
 	}
 
 	// Reload pull request information.
 	if err = pr.LoadAttributes(); err != nil {
-		log.Error(4, "LoadAttributes: %v", err)
+		log.Error(2, "LoadAttributes: %v", err)
 		return nil
 	}
 	if err = PrepareWebhooks(pr.Issue.Repo, HOOK_EVENT_PULL_REQUEST, &api.PullRequestPayload{
@@ -291,13 +293,13 @@ func (pr *PullRequest) Merge(doer *User, baseGitRepo *git.Repository) (err error
 		Repository:  pr.Issue.Repo.APIFormat(nil),
 		Sender:      doer.APIFormat(),
 	}); err != nil {
-		log.Error(4, "PrepareWebhooks: %v", err)
+		log.Error(2, "PrepareWebhooks: %v", err)
 		return nil
 	}
 
 	l, err := headGitRepo.CommitsBetweenIDs(pr.MergedCommitID, pr.MergeBase)
 	if err != nil {
-		log.Error(4, "CommitsBetweenIDs: %v", err)
+		log.Error(2, "CommitsBetweenIDs: %v", err)
 		return nil
 	}
 
@@ -307,41 +309,37 @@ func (pr *PullRequest) Merge(doer *User, baseGitRepo *git.Repository) (err error
 	// to avoid strange diff commits produced.
 	mergeCommit, err := baseGitRepo.GetBranchCommit(pr.BaseBranch)
 	if err != nil {
-		log.Error(4, "GetBranchCommit: %v", err)
+		log.Error(2, "GetBranchCommit: %v", err)
 		return nil
 	}
 	l.PushFront(mergeCommit)
+
+	commits, err := ListToPushCommits(l).ToApiPayloadCommits(pr.BaseRepo.RepoPath(), pr.BaseRepo.HTMLURL())
+	if err != nil {
+		log.Error(2, "ToApiPayloadCommits: %v", err)
+		return nil
+	}
 
 	p := &api.PushPayload{
 		Ref:        git.BRANCH_PREFIX + pr.BaseBranch,
 		Before:     pr.MergeBase,
 		After:      pr.MergedCommitID,
 		CompareURL: setting.AppUrl + pr.BaseRepo.ComposeCompareURL(pr.MergeBase, pr.MergedCommitID),
-		Commits:    ListToPushCommits(l).ToApiPayloadCommits(pr.BaseRepo.HTMLURL()),
+		Commits:    commits,
 		Repo:       pr.BaseRepo.APIFormat(nil),
 		Pusher:     pr.HeadRepo.MustOwner().APIFormat(),
 		Sender:     doer.APIFormat(),
 	}
 	if err = PrepareWebhooks(pr.BaseRepo, HOOK_EVENT_PUSH, p); err != nil {
-		return fmt.Errorf("PrepareWebhooks: %v", err)
+		log.Error(2, "PrepareWebhooks: %v", err)
+		return nil
 	}
 	return nil
-}
-
-// patchConflicts is a list of conflit description from Git.
-var patchConflicts = []string{
-	"patch does not apply",
-	"already exists in working directory",
-	"unrecognized input",
-	"error:",
 }
 
 // testPatch checks if patch can be merged to base repository without conflit.
 // FIXME: make a mechanism to clean up stable local copies.
 func (pr *PullRequest) testPatch() (err error) {
-	repoWorkingPool.CheckIn(com.ToStr(pr.BaseRepoID))
-	defer repoWorkingPool.CheckOut(com.ToStr(pr.BaseRepoID))
-
 	if pr.BaseRepo == nil {
 		pr.BaseRepo, err = GetRepositoryByID(pr.BaseRepoID)
 		if err != nil {
@@ -360,10 +358,13 @@ func (pr *PullRequest) testPatch() (err error) {
 		return nil
 	}
 
+	repoWorkingPool.CheckIn(com.ToStr(pr.BaseRepoID))
+	defer repoWorkingPool.CheckOut(com.ToStr(pr.BaseRepoID))
+
 	log.Trace("PullRequest[%d].testPatch (patchPath): %s", pr.ID, patchPath)
 
 	if err := pr.BaseRepo.UpdateLocalCopyBranch(pr.BaseBranch); err != nil {
-		return fmt.Errorf("UpdateLocalCopy: %v", err)
+		return fmt.Errorf("UpdateLocalCopy [%d]: %v", pr.BaseRepoID, err)
 	}
 
 	pr.Status = PULL_REQUEST_STATUS_CHECKING
@@ -371,16 +372,9 @@ func (pr *PullRequest) testPatch() (err error) {
 		fmt.Sprintf("testPatch (git apply --check): %d", pr.BaseRepo.ID),
 		"git", "apply", "--check", patchPath)
 	if err != nil {
-		for i := range patchConflicts {
-			if strings.Contains(stderr, patchConflicts[i]) {
-				log.Trace("PullRequest[%d].testPatch (apply): has conflit", pr.ID)
-				fmt.Println(stderr)
-				pr.Status = PULL_REQUEST_STATUS_CONFLICT
-				return nil
-			}
-		}
-
-		return fmt.Errorf("git apply --check: %v - %s", err, stderr)
+		log.Trace("PullRequest[%d].testPatch (apply): has conflit\n%s", pr.ID, stderr)
+		pr.Status = PULL_REQUEST_STATUS_CONFLICT
+		return nil
 	}
 	return nil
 }
@@ -436,9 +430,10 @@ func NewPullRequest(repo *Repository, pull *Issue, labelIDs []int64, uuids []str
 		RepoName:     repo.Name,
 		IsPrivate:    repo.IsPrivate,
 	}); err != nil {
-		log.Error(4, "NotifyWatchers: %v", err)
-	} else if err = pull.MailParticipants(); err != nil {
-		log.Error(4, "MailParticipants: %v", err)
+		log.Error(2, "NotifyWatchers: %v", err)
+	}
+	if err = pull.MailParticipants(); err != nil {
+		log.Error(2, "MailParticipants: %v", err)
 	}
 
 	pr.Issue = pull
@@ -450,9 +445,8 @@ func NewPullRequest(repo *Repository, pull *Issue, labelIDs []int64, uuids []str
 		Repository:  repo.APIFormat(nil),
 		Sender:      pull.Poster.APIFormat(),
 	}); err != nil {
-		log.Error(4, "PrepareWebhooks: %v", err)
+		log.Error(2, "PrepareWebhooks: %v", err)
 	}
-	go HookQueue.Add(repo.ID)
 
 	return nil
 }
@@ -537,19 +531,11 @@ func (pr *PullRequest) UpdateCols(cols ...string) error {
 	return err
 }
 
-var PullRequestQueue = NewUniqueQueue(setting.Repository.PullRequestQueueLength)
-
 // UpdatePatch generates and saves a new patch.
 func (pr *PullRequest) UpdatePatch() (err error) {
-	if err = pr.GetHeadRepo(); err != nil {
-		return fmt.Errorf("GetHeadRepo: %v", err)
-	} else if pr.HeadRepo == nil {
+	if pr.HeadRepo == nil {
 		log.Trace("PullRequest[%d].UpdatePatch: ignored cruppted data", pr.ID)
 		return nil
-	}
-
-	if err = pr.GetBaseRepo(); err != nil {
-		return fmt.Errorf("GetBaseRepo: %v", err)
 	}
 
 	headGitRepo, err := git.OpenRepository(pr.HeadRepo.RepoPath())
@@ -621,35 +607,45 @@ func (pr *PullRequest) AddToTaskQueue() {
 	go PullRequestQueue.AddFunc(pr.ID, func() {
 		pr.Status = PULL_REQUEST_STATUS_CHECKING
 		if err := pr.UpdateCols("status"); err != nil {
-			log.Error(5, "AddToTaskQueue.UpdateCols[%d].(add to queue): %v", pr.ID, err)
+			log.Error(3, "AddToTaskQueue.UpdateCols[%d].(add to queue): %v", pr.ID, err)
 		}
 	})
 }
 
 type PullRequestList []*PullRequest
 
-func (prs PullRequestList) loadAttributes(e Engine) error {
+func (prs PullRequestList) loadAttributes(e Engine) (err error) {
 	if len(prs) == 0 {
 		return nil
 	}
 
-	// Load issues.
-	issueIDs := make([]int64, 0, len(prs))
+	// Load issues
+	set := make(map[int64]*Issue)
 	for i := range prs {
-		issueIDs = append(issueIDs, prs[i].IssueID)
+		set[prs[i].IssueID] = nil
+	}
+	issueIDs := make([]int64, 0, len(prs))
+	for issueID := range set {
+		issueIDs = append(issueIDs, issueID)
 	}
 	issues := make([]*Issue, 0, len(issueIDs))
-	if err := e.Where("id > 0").In("id", issueIDs).Find(&issues); err != nil {
+	if err = e.Where("id > 0").In("id", issueIDs).Find(&issues); err != nil {
 		return fmt.Errorf("find issues: %v", err)
 	}
-
-	set := make(map[int64]*Issue)
 	for i := range issues {
 		set[issues[i].ID] = issues[i]
 	}
 	for i := range prs {
 		prs[i].Issue = set[prs[i].IssueID]
 	}
+
+	// Load attributes
+	for i := range prs {
+		if err = prs[i].loadAttributes(e); err != nil {
+			return fmt.Errorf("loadAttributes [%d]: %v", prs[i].ID, err)
+		}
+	}
+
 	return nil
 }
 
@@ -678,20 +674,20 @@ func AddTestPullRequestTask(doer *User, repoID int64, branch string, isSync bool
 	log.Trace("AddTestPullRequestTask [head_repo_id: %d, head_branch: %s]: finding pull requests", repoID, branch)
 	prs, err := GetUnmergedPullRequestsByHeadInfo(repoID, branch)
 	if err != nil {
-		log.Error(4, "Find pull requests [head_repo_id: %d, head_branch: %s]: %v", repoID, branch, err)
+		log.Error(2, "Find pull requests [head_repo_id: %d, head_branch: %s]: %v", repoID, branch, err)
 		return
 	}
 
 	if isSync {
 		if err = PullRequestList(prs).LoadAttributes(); err != nil {
-			log.Error(4, "PullRequestList.LoadAttributes: %v", err)
+			log.Error(2, "PullRequestList.LoadAttributes: %v", err)
 		}
 
 		if err == nil {
 			for _, pr := range prs {
 				pr.Issue.PullRequest = pr
 				if err = pr.Issue.LoadAttributes(); err != nil {
-					log.Error(4, "LoadAttributes: %v", err)
+					log.Error(2, "LoadAttributes: %v", err)
 					continue
 				}
 				if err = PrepareWebhooks(pr.Issue.Repo, HOOK_EVENT_PULL_REQUEST, &api.PullRequestPayload{
@@ -701,10 +697,9 @@ func AddTestPullRequestTask(doer *User, repoID int64, branch string, isSync bool
 					Repository:  pr.Issue.Repo.APIFormat(nil),
 					Sender:      doer.APIFormat(),
 				}); err != nil {
-					log.Error(4, "PrepareWebhooks [pull_id: %v]: %v", pr.ID, err)
+					log.Error(2, "PrepareWebhooks [pull_id: %v]: %v", pr.ID, err)
 					continue
 				}
-				go HookQueue.Add(pr.Issue.Repo.ID)
 			}
 		}
 	}
@@ -714,7 +709,7 @@ func AddTestPullRequestTask(doer *User, repoID int64, branch string, isSync bool
 	log.Trace("AddTestPullRequestTask [base_repo_id: %d, base_branch: %s]: finding pull requests", repoID, branch)
 	prs, err = GetUnmergedPullRequestsByBaseInfo(repoID, branch)
 	if err != nil {
-		log.Error(4, "Find pull requests [base_repo_id: %d, base_branch: %s]: %v", repoID, branch, err)
+		log.Error(2, "Find pull requests [base_repo_id: %d, base_branch: %s]: %v", repoID, branch, err)
 		return
 	}
 	for _, pr := range prs {
@@ -756,8 +751,8 @@ func TestPullRequests() {
 		func(idx int, bean interface{}) error {
 			pr := bean.(*PullRequest)
 
-			if err := pr.GetBaseRepo(); err != nil {
-				log.Error(3, "GetBaseRepo: %v", err)
+			if err := pr.LoadAttributes(); err != nil {
+				log.Error(3, "LoadAttributes: %v", err)
 				return nil
 			}
 
@@ -781,7 +776,7 @@ func TestPullRequests() {
 
 		pr, err := GetPullRequestByID(com.StrTo(prID).MustInt64())
 		if err != nil {
-			log.Error(4, "GetPullRequestByID[%d]: %v", prID, err)
+			log.Error(4, "GetPullRequestByID[%s]: %v", prID, err)
 			continue
 		} else if err = pr.testPatch(); err != nil {
 			log.Error(4, "testPatch[%d]: %v", pr.ID, err)

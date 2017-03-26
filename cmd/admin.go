@@ -7,14 +7,14 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/codegangsta/cli"
+	"github.com/urfave/cli"
 
 	"github.com/gogits/gogs/models"
 	"github.com/gogits/gogs/modules/setting"
 )
 
 var (
-	CmdAdmin = cli.Command{
+	Admin = cli.Command{
 		Name:  "admin",
 		Usage: "Preform admin operations on command line",
 		Description: `Allow using internal logic of Gogs without hacking into the source code

@@ -9,13 +9,13 @@ import (
 
 	"github.com/Unknwon/com"
 	"github.com/go-xorm/core"
+	log "gopkg.in/clog.v1"
 
 	"github.com/gogits/gogs/models"
-	"github.com/gogits/gogs/modules/auth"
 	"github.com/gogits/gogs/modules/auth/ldap"
 	"github.com/gogits/gogs/modules/base"
 	"github.com/gogits/gogs/modules/context"
-	"github.com/gogits/gogs/modules/log"
+	"github.com/gogits/gogs/modules/form"
 	"github.com/gogits/gogs/modules/setting"
 )
 
@@ -76,64 +76,64 @@ func NewAuthSource(ctx *context.Context) {
 	ctx.HTML(200, AUTH_NEW)
 }
 
-func parseLDAPConfig(form auth.AuthenticationForm) *models.LDAPConfig {
+func parseLDAPConfig(f form.Authentication) *models.LDAPConfig {
 	return &models.LDAPConfig{
 		Source: &ldap.Source{
-			Name:              form.Name,
-			Host:              form.Host,
-			Port:              form.Port,
-			SecurityProtocol:  ldap.SecurityProtocol(form.SecurityProtocol),
-			SkipVerify:        form.SkipVerify,
-			BindDN:            form.BindDN,
-			UserDN:            form.UserDN,
-			BindPassword:      form.BindPassword,
-			UserBase:          form.UserBase,
-			AttributeUsername: form.AttributeUsername,
-			AttributeName:     form.AttributeName,
-			AttributeSurname:  form.AttributeSurname,
-			AttributeMail:     form.AttributeMail,
-			AttributesInBind:  form.AttributesInBind,
-			Filter:            form.Filter,
-			AdminFilter:       form.AdminFilter,
+			Name:              f.Name,
+			Host:              f.Host,
+			Port:              f.Port,
+			SecurityProtocol:  ldap.SecurityProtocol(f.SecurityProtocol),
+			SkipVerify:        f.SkipVerify,
+			BindDN:            f.BindDN,
+			UserDN:            f.UserDN,
+			BindPassword:      f.BindPassword,
+			UserBase:          f.UserBase,
+			AttributeUsername: f.AttributeUsername,
+			AttributeName:     f.AttributeName,
+			AttributeSurname:  f.AttributeSurname,
+			AttributeMail:     f.AttributeMail,
+			AttributesInBind:  f.AttributesInBind,
+			Filter:            f.Filter,
+			AdminFilter:       f.AdminFilter,
 			Enabled:           true,
 		},
 	}
 }
 
-func parseSMTPConfig(form auth.AuthenticationForm) *models.SMTPConfig {
+func parseSMTPConfig(f form.Authentication) *models.SMTPConfig {
 	return &models.SMTPConfig{
-		Auth:           form.SMTPAuth,
-		Host:           form.SMTPHost,
-		Port:           form.SMTPPort,
-		AllowedDomains: form.AllowedDomains,
-		TLS:            form.TLS,
-		SkipVerify:     form.SkipVerify,
+		Auth:           f.SMTPAuth,
+		Host:           f.SMTPHost,
+		Port:           f.SMTPPort,
+		AllowedDomains: f.AllowedDomains,
+		TLS:            f.TLS,
+		SkipVerify:     f.SkipVerify,
 	}
 }
 
-func NewAuthSourcePost(ctx *context.Context, form auth.AuthenticationForm) {
+func NewAuthSourcePost(ctx *context.Context, f form.Authentication) {
 	ctx.Data["Title"] = ctx.Tr("admin.auths.new")
 	ctx.Data["PageIsAdmin"] = true
 	ctx.Data["PageIsAdminAuthentications"] = true
 
-	ctx.Data["CurrentTypeName"] = models.LoginNames[models.LoginType(form.Type)]
-	ctx.Data["CurrentSecurityProtocol"] = models.SecurityProtocolNames[ldap.SecurityProtocol(form.SecurityProtocol)]
+	ctx.Data["CurrentTypeName"] = models.LoginNames[models.LoginType(f.Type)]
+	ctx.Data["CurrentSecurityProtocol"] = models.SecurityProtocolNames[ldap.SecurityProtocol(f.SecurityProtocol)]
 	ctx.Data["AuthSources"] = authSources
 	ctx.Data["SecurityProtocols"] = securityProtocols
 	ctx.Data["SMTPAuths"] = models.SMTPAuths
 
 	hasTLS := false
 	var config core.Conversion
-	switch models.LoginType(form.Type) {
+	switch models.LoginType(f.Type) {
 	case models.LOGIN_LDAP, models.LOGIN_DLDAP:
-		config = parseLDAPConfig(form)
-		hasTLS = ldap.SecurityProtocol(form.SecurityProtocol) > ldap.SECURITY_PROTOCOL_UNENCRYPTED
+		config = parseLDAPConfig(f)
+		hasTLS = ldap.SecurityProtocol(f.SecurityProtocol) > ldap.SECURITY_PROTOCOL_UNENCRYPTED
 	case models.LOGIN_SMTP:
-		config = parseSMTPConfig(form)
+		config = parseSMTPConfig(f)
 		hasTLS = true
 	case models.LOGIN_PAM:
 		config = &models.PAMConfig{
-			ServiceName: form.PAMServiceName,
+			ServiceName: f.PAMServiceName,
 		}
 	default:
 		ctx.Error(400)
@@ -146,19 +146,24 @@ func NewAuthSourcePost(ctx *context.Context, form auth.AuthenticationForm) {
 		return
 	}
 
-	if err := models.CreateSource(&models.LoginSource{
-		Type:      models.LoginType(form.Type),
-		Name:      form.Name,
-		IsActived: form.IsActive,
+	if err := models.CreateLoginSource(&models.LoginSource{
+		Type:      models.LoginType(f.Type),
+		Name:      f.Name,
+		IsActived: f.IsActive,
 		Cfg:       config,
 	}); err != nil {
-		ctx.Handle(500, "CreateSource", err)
+		if models.IsErrLoginSourceAlreadyExist(err) {
+			ctx.Data["Err_Name"] = true
+			ctx.RenderWithErr(ctx.Tr("admin.auths.login_source_exist", err.(models.ErrLoginSourceAlreadyExist).Name), AUTH_NEW, f)
+		} else {
+			ctx.Handle(500, "CreateSource", err)
+		}
 		return
 	}
 
-	log.Trace("Authentication created by admin(%s): %s", ctx.User.Name, form.Name)
+	log.Trace("Authentication created by admin(%s): %s", ctx.User.Name, f.Name)
 
-	ctx.Flash.Success(ctx.Tr("admin.auths.new_success", form.Name))
+	ctx.Flash.Success(ctx.Tr("admin.auths.new_success", f.Name))
 	ctx.Redirect(setting.AppSubUrl + "/admin/auths")
 }
 
@@ -181,7 +186,7 @@ func EditAuthSource(ctx *context.Context) {
 	ctx.HTML(200, AUTH_EDIT)
 }
 
-func EditAuthSourcePost(ctx *context.Context, form auth.AuthenticationForm) {
+func EditAuthSourcePost(ctx *context.Context, f form.Authentication) {
 	ctx.Data["Title"] = ctx.Tr("admin.auths.edit")
 	ctx.Data["PageIsAdmin"] = true
 	ctx.Data["PageIsAdminAuthentications"] = true
@@ -202,31 +207,31 @@ func EditAuthSourcePost(ctx *context.Context, form auth.AuthenticationForm) {
 	}
 
 	var config core.Conversion
-	switch models.LoginType(form.Type) {
+	switch models.LoginType(f.Type) {
 	case models.LOGIN_LDAP, models.LOGIN_DLDAP:
-		config = parseLDAPConfig(form)
+		config = parseLDAPConfig(f)
 	case models.LOGIN_SMTP:
-		config = parseSMTPConfig(form)
+		config = parseSMTPConfig(f)
 	case models.LOGIN_PAM:
 		config = &models.PAMConfig{
-			ServiceName: form.PAMServiceName,
+			ServiceName: f.PAMServiceName,
 		}
 	default:
 		ctx.Error(400)
 		return
 	}
 
-	source.Name = form.Name
-	source.IsActived = form.IsActive
+	source.Name = f.Name
+	source.IsActived = f.IsActive
 	source.Cfg = config
 	if err := models.UpdateSource(source); err != nil {
 		ctx.Handle(500, "UpdateSource", err)
 		return
 	}
-	log.Trace("Authentication changed by admin(%s): %s", ctx.User.Name, source.ID)
+	log.Trace("Authentication changed by admin(%s): %d", ctx.User.Name, source.ID)
 
 	ctx.Flash.Success(ctx.Tr("admin.auths.update_success"))
-	ctx.Redirect(setting.AppSubUrl + "/admin/auths/" + com.ToStr(form.ID))
+	ctx.Redirect(setting.AppSubUrl + "/admin/auths/" + com.ToStr(f.ID))
 }
 
 func DeleteAuthSource(ctx *context.Context) {
@@ -237,10 +242,9 @@ func DeleteAuthSource(ctx *context.Context) {
 	}
 
 	if err = models.DeleteSource(source); err != nil {
-		switch err {
-		case models.ErrAuthenticationUserUsed:
+		if models.IsErrLoginSourceInUse(err) {
 			ctx.Flash.Error(ctx.Tr("admin.auths.still_in_used"))
-		default:
+		} else {
 			ctx.Flash.Error(fmt.Sprintf("DeleteSource: %v", err))
 		}
 		ctx.JSON(200, map[string]interface{}{

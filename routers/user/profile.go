@@ -12,6 +12,7 @@ import (
 	"github.com/Unknwon/paginater"
 
 	"github.com/gogits/gogs/models"
+	"github.com/gogits/gogs/models/errors"
 	"github.com/gogits/gogs/modules/base"
 	"github.com/gogits/gogs/modules/context"
 	"github.com/gogits/gogs/modules/setting"
@@ -26,11 +27,7 @@ const (
 func GetUserByName(ctx *context.Context, name string) *models.User {
 	user, err := models.GetUserByName(name)
 	if err != nil {
-		if models.IsErrUserNotExist(err) {
-			ctx.Handle(404, "GetUserByName", nil)
-		} else {
-			ctx.Handle(500, "GetUserByName", err)
-		}
+		ctx.NotFoundOrServerError("GetUserByName", errors.IsUserNotExist, err)
 		return nil
 	}
 	return user
@@ -89,7 +86,7 @@ func Profile(ctx *context.Context) {
 	ctx.Data["TabName"] = tab
 	switch tab {
 	case "activity":
-		retrieveFeeds(ctx, ctxUser, -1, 0, true)
+		retrieveFeeds(ctx, ctxUser, -1, true)
 		if ctx.Written() {
 			return
 		}
@@ -99,12 +96,20 @@ func Profile(ctx *context.Context) {
 			page = 1
 		}
 
-		ctx.Data["Repos"], err = models.GetUserRepositories(ctxUser.ID, ctx.IsSigned && ctx.User.ID == ctxUser.ID, page, setting.UI.User.RepoPagingNum)
+		showPrivate := ctx.IsSigned && (ctxUser.ID == ctx.User.ID || ctx.User.IsAdmin)
+		ctx.Data["Repos"], err = models.GetUserRepositories(&models.UserRepoOptions{
+			UserID:   ctxUser.ID,
+			Private:  showPrivate,
+			Page:     page,
+			PageSize: setting.UI.User.RepoPagingNum,
+		})
 		if err != nil {
 			ctx.Handle(500, "GetRepositories", err)
 			return
 		}
-		ctx.Data["Page"] = paginater.New(ctxUser.NumRepos, setting.UI.User.RepoPagingNum, page, 5)
+
+		count := models.CountUserRepositories(ctxUser.ID, showPrivate)
+		ctx.Data["Page"] = paginater.New(int(count), setting.UI.User.RepoPagingNum, page, 5)
 	}
 
 	ctx.HTML(200, PROFILE)

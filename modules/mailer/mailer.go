@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/jaytaylor/html2text"
+	log "gopkg.in/clog.v1"
 	"gopkg.in/gomail.v2"
 
-	"github.com/gogits/gogs/modules/log"
 	"github.com/gogits/gogs/modules/setting"
 )
 
@@ -36,16 +36,18 @@ func NewMessageFrom(to []string, from, subject, htmlBody string) *Message {
 	msg.SetHeader("Subject", subject)
 	msg.SetDateHeader("Date", time.Now())
 
-	body, err := html2text.FromString(htmlBody)
-	if err != nil {
-		log.Error(4, "html2text.FromString: %v", err)
-		msg.SetBody("text/html", htmlBody)
-	} else {
-		msg.SetBody("text/plain", body)
-		if setting.MailService.EnableHTMLAlternative {
-			msg.AddAlternative("text/html", htmlBody)
+	contentType := "text/html"
+	body := htmlBody
+	if setting.MailService.UsePlainText {
+		plainBody, err := html2text.FromString(htmlBody)
+		if err != nil {
+			log.Error(2, "html2text.FromString: %v", err)
+		} else {
+			contentType = "text/plain"
+			body = plainBody
 		}
 	}
+	msg.SetBody(contentType, body)
 
 	return &Message{
 		Message: msg,
@@ -126,8 +128,8 @@ func (s *Sender) Send(from string, to []string, msg io.WriterTo) error {
 		return fmt.Errorf("NewClient: %v", err)
 	}
 
-	if !setting.MailService.DisableHelo {
-		hostname := setting.MailService.HeloHostname
+	if !opts.DisableHelo {
+		hostname := opts.HeloHostname
 		if len(hostname) == 0 {
 			hostname, err = os.Hostname()
 			if err != nil {
